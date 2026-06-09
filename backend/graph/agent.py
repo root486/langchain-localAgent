@@ -32,6 +32,8 @@ KNOWLEDGE_SKILL_PATTERNS = (
 def _stringify_content(content: Any) -> str:
     if isinstance(content, str):
         return content
+    # 如果是多模态：[{"type": "text", "text": "你好"}, {"type": "image", ...}]
+    # 只提取文本内容
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -51,7 +53,7 @@ class AgentManager:
         self.base_dir = base_dir
         self.session_manager = SessionManager(base_dir)
         self.tools = get_all_tools(base_dir)
-        knowledge_orchestrator.configure(base_dir, self._build_chat_model)
+        knowledge_orchestrator.configure(base_dir, self._build_chat_model)#负责编排知识库检索流程
 
     def _build_chat_model(self):
         settings = get_settings()
@@ -83,18 +85,20 @@ class AgentManager:
         extra_instructions: list[str] | None = None,
         tools_override: list[Any] | None = None,
     ):
+        #如果还没初始化
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
 
         system_prompt = build_system_prompt(self.base_dir, runtime_config.get_rag_mode())
+        #如果约束指令（用来控制 AI 的行为方式），添加到系统提示词中
         if extra_instructions:
             system_prompt = f"{system_prompt}\n\n" + "\n\n".join(extra_instructions)
         return create_agent(
             model=self._build_chat_model(),
-            tools=self.tools if tools_override is None else tools_override,
+            tools=self.tools if tools_override is None else tools_override,#如果有指定工具，则使用指定的工具，没有则默认使用全部工具
             system_prompt=system_prompt,
         )
-
+    #判断是否是知识库查询
     def _is_knowledge_query(self, message: str) -> bool:
         return any(pattern.search(message) for pattern in KNOWLEDGE_SKILL_PATTERNS)
 
@@ -107,14 +111,17 @@ class AgentManager:
             messages.append({"role": role, "content": str(item.get("content", ""))})
         return messages
 
+    #把记忆检索的结果格式化成一段文本，塞给 AI 当上下文用。
     def _format_retrieval_context(self, results: list[dict[str, Any]]) -> str:
         lines = ["[RAG retrieved memory context]"]
+        #遍历检索结果并编号
         for idx, item in enumerate(results, start=1):
             text = str(item.get("text", "")).strip()
             source = str(item.get("source", "memory/MEMORY.md"))
             lines.append(f"{idx}. Source: {source}\n{text}")
         return "\n\n".join(lines)
 
+    #将记忆检索步骤格式化为和知识库检索步骤一样的标准格式，方便前端统一展示。
     def _format_memory_retrieval_step(self, results: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "kind": "memory",
@@ -152,6 +159,7 @@ class AgentManager:
             )
         return "\n\n".join(lines)
 
+    #生成知识库回答的行为约束指令列表，限制 AI 只基于检索证据回答。
     def _knowledge_answer_instructions(self, retrieval_result) -> list[str]:
         instructions = [
             "This is a knowledge-base question.",
@@ -162,7 +170,7 @@ class AgentManager:
             "When evidence is insufficient, suggest narrowing the scope by directory, file, keyword, field name, or time range.",
             "Cite the file paths you relied on.",
         ]
-        if retrieval_result.reason:
+        if retrieval_result.reason: # 如果有备注，添加到指令中
             instructions.append(f"Current retrieval note: {retrieval_result.reason}")
         return instructions
 
@@ -200,10 +208,13 @@ class AgentManager:
 
         rag_mode = runtime_config.get_rag_mode()
         augmented_history = list(history)
+        #RAG模式
         if rag_mode:
             retrievals = memory_indexer.retrieve(message, top_k=3)
             if retrievals:
-                yield {"type": "retrieval", **self._format_memory_retrieval_step(retrievals)}
+                yield {"type": "retrieval", **self._format_memory_retrieval_step(retrievals)}# 推检索步骤给前端
+
+
             if retrievals:
                 augmented_history.append(
                     {
@@ -211,15 +222,16 @@ class AgentManager:
                         "content": self._format_retrieval_context(retrievals),
                     }
                 )
-
+        #命中知识库关键词，触发知识库检索
         if self._is_knowledge_query(message):
             knowledge_result = None
             async for event in knowledge_orchestrator.astream(message):
+                # 将编排器内部的中间过程事件（如工具调用）直接推送给前端
                 if event.get("type") == "orchestrated_result":
                     knowledge_result = event["result"]
                     continue
                 yield event
-
+            # 将编排器整理后的检索步骤逐个推送给前端
             if knowledge_result is not None:
                 for step in knowledge_result.steps:
                     yield {"type": "retrieval", **step.to_dict()}
@@ -239,21 +251,21 @@ class AgentManager:
             ):
                 yield event
             return
-
+        #普通Agent对话路径
         agent = self._build_agent()
         messages = self._build_messages(augmented_history)
         messages.append({"role": "user", "content": message})
 
-        final_content_parts: list[str] = []
-        last_ai_message = ""
-        pending_tools: dict[str, dict[str, str]] = {}
-
+        final_content_parts: list[str] = []#收集 AI 输出的所有文字片段，最后拼成完整回复
+        last_ai_message = ""#AI 最后一条完整消息（兜底用）
+        pending_tools: dict[str, dict[str, str]] = {}#配对工具调用的开始和结束，工具名和输入参数要靠配对才能拿到。
         async for mode, payload in agent.astream(
             {"messages": messages},
             stream_mode=["messages", "updates"],
-        ):
+        ):  #逐 token 推送
             if mode == "messages":
                 chunk, metadata = payload
+                #过滤工具节点的内容
                 if metadata.get("langgraph_node") != "model":
                     continue
                 text = _stringify_content(getattr(chunk, "content", ""))
@@ -261,7 +273,7 @@ class AgentManager:
                     final_content_parts.append(text)
                     yield {"type": "token", "content": text}
                 continue
-
+            #update模式，推送完整消息         
             if mode != "updates":
                 continue
 

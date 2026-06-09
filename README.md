@@ -1,5 +1,3 @@
-# Ragclaw
-
 本项目是一个面向本地运行、文件优先、可审计的 Agent 工作台。
 
 - 对话、工具调用、检索过程都会落到本地文件
@@ -261,6 +259,4 @@ $env:NEXT_PUBLIC_API_BASE_URL="http://127.0.0.1:8010/api"
 - 混合检索当前主要覆盖 Markdown / JSON 类知识文件
 - 技能和知识链路仍在快速迭代中
 
-## 致谢
 
-`skill` 设计思路参考了 [ConardLi/rag-skill](https://github.com/ConardLi/rag-skill)。

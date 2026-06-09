@@ -13,7 +13,7 @@ class SessionManager:
         self.sessions_dir = base_dir / "sessions"
         self.archive_dir = self.sessions_dir / "archive"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)#用来存放被压缩掉的旧消息
 
     def _session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"
@@ -37,6 +37,7 @@ class SessionManager:
             return record
 
         raw = json.loads(path.read_text(encoding="utf-8"))
+        #兼容旧版本数据，如果是消息列表格式，则转换为完整记录格式
         if isinstance(raw, list):
             record = self._default_record(session_id)
             record["messages"] = raw
@@ -65,6 +66,7 @@ class SessionManager:
         self._write_session(record)
         return record
 
+    #扫描 sessions 文件夹，列出所有会话的摘要信息，按最近更新时间倒序排列。
     def list_sessions(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for path in self.sessions_dir.glob("*.json"):
@@ -93,8 +95,8 @@ class SessionManager:
 
     def load_session_for_agent(self, session_id: str) -> list[dict[str, str]]:
         record = self._read_session_file(session_id)
-        merged: list[dict[str, str]] = []
-
+        merged: list[dict[str, str]] = []#存放的是给 Agent 用的对话历史
+        #如果压缩了历史消息，压缩后的消息添加到 merged 中
         compressed_context = record.get("compressed_context", "").strip()
         if compressed_context:
             merged.append(
@@ -103,22 +105,23 @@ class SessionManager:
                     "content": f"[以下是之前对话的摘要]\n{compressed_context}",
                 }
             )
-
+        #合并连续 assistant 消息
         for message in record.get("messages", []):
             role = message.get("role", "")
             content = str(message.get("content", "") or "")
             if role == "assistant" and merged and merged[-1]["role"] == "assistant":
                 if content:
                     if merged[-1]["content"]:
-                        merged[-1]["content"] += "\n\n" + content
+                        merged[-1]["content"] += "\n\n" + content  # 上一条不为空则追加
                     else:
-                        merged[-1]["content"] = content
+                        merged[-1]["content"] = content  # 上一条为空则替换
                 continue
 
             merged.append({"role": role, "content": content})
 
         return [item for item in merged if item["role"] in {"user", "assistant"}]
 
+    # 保存消息到磁盘
     def save_message(
         self,
         session_id: str,
