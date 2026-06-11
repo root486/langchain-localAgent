@@ -102,10 +102,10 @@ class KnowledgeIndexer:
         with self._lock:
             self._building = True
             try:
-                self._documents = self._build_documents()
-                self._write_manifest()
-                self._prepare_bm25_stats()
-                self._build_vector_index()
+                self._documents = self._build_documents()# 读文件+切分
+                self._write_manifest()  # 存manifest
+                self._prepare_bm25_stats()# 统计BM25数据
+                self._build_vector_index()   # 建向量索引
                 self._last_built_at = time.time()
             finally:
                 self._building = False

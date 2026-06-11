@@ -32,8 +32,8 @@ async def chat(payload: ChatRequest):
     if session_manager is None:
         raise HTTPException(status_code=503, detail="Agent manager is not initialized")
 
-    history_record = session_manager.load_session_record(payload.session_id)
-    history = session_manager.load_session_for_agent(payload.session_id)
+    history_record = session_manager.load_session_record(payload.session_id)# 加载会话记录
+    history = session_manager.load_session_for_agent(payload.session_id)# 加载Agent历史
     #检查是否是第一条用户消息
     is_first_user_message = not any(
         message.get("role") == "user"

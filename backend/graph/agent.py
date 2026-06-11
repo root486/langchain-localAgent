@@ -294,6 +294,7 @@ class AgentManager:
                             tool_args = tool_call.get("args", "")
                             if not isinstance(tool_args, str):
                                 tool_args = json.dumps(tool_args, ensure_ascii=False)
+                            #前端推 tool_end 事件时需要工具名，但tool_end 事件中只提供输入参数，因此需要pending_tools 暂存
                             pending_tools[call_id] = {
                                 "tool": tool_name,
                                 "input": str(tool_args),
@@ -318,7 +319,7 @@ class AgentManager:
                         }
                         yield {"type": "new_response"}
 
-        final_content = "".join(final_content_parts).strip() or last_ai_message.strip()
+        final_content = "".join(final_content_parts).strip() or last_ai_message.strip()# 把所有文字片段拼成一个字符串
         yield {"type": "done", "content": final_content}
 
     async def generate_title(self, first_user_message: str) -> str:

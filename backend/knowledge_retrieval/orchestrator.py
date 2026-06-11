@@ -15,7 +15,7 @@ class KnowledgeOrchestrator:
     def configure(self, base_dir, model_builder) -> None:
         self.base_dir = base_dir
         skill_retriever_agent.configure(base_dir, model_builder)
-
+    #把 Skill 检索器返回的原始字典，转成 SkillRetrievalResult 对象。
     def _skill_result_from_payload(self, payload: dict) -> SkillRetrievalResult:
         evidences: list[Evidence] = []
         for item in payload.get("evidences", []):
@@ -78,12 +78,13 @@ class KnowledgeOrchestrator:
         final_evidences = list(skill_result.evidences[:6])
         final_status = skill_result.status
         final_reason = skill_result.reason
+        #判断是否需要补充
 
         should_fallback = (
             skill_result.status in {"partial", "not_found", "uncertain"}
             and (
-                not skill_result.narrowed_types
-                or any(item in {"md", "json"} for item in skill_result.narrowed_types)
+                not skill_result.narrowed_types       #Skill Agent 判断出来的答案在哪种类型的文件里
+                or any(item in {"md", "json"} for item in skill_result.narrowed_types)#若文件是md和json文件，则进行补充，因为向量检索擅长搜索
             )
         )
 
@@ -127,6 +128,7 @@ class KnowledgeOrchestrator:
                     )
                 )
 
+            #RRF融合：把三路证据合并
             fused = reciprocal_rank_fusion(
                 [
                     skill_result.evidences,

@@ -170,6 +170,7 @@ class SkillRetrieverAgent:
     async def astream(self, query: str) -> AsyncIterator[dict[str, Any]]:
         if self.base_dir is None or self._model_builder is None:
             raise RuntimeError("SkillRetrieverAgent is not configured")
+        # 系统提示词：告诉AI你是检索Agent，不是回答Agent
 
         system_prompt = (
             "You are a local knowledge retrieval agent. "
@@ -194,9 +195,9 @@ class SkillRetrieverAgent:
             system_prompt=system_prompt,
         )
 
-        pending_tools: dict[str, dict[str, str]] = {}
-        recorded_tools: list[dict[str, str]] = []
-        final_parts: list[str] = []
+        pending_tools: dict[str, dict[str, str]] = {} # 工具配对用
+        recorded_tools: list[dict[str, str]] = [] #  记录所有工具调用
+        final_parts: list[str] = [] # 收集AI输出文字
         last_ai_message = ""
 
         async for mode, payload in agent.astream(
