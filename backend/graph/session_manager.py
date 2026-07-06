@@ -160,9 +160,9 @@ class SessionManager:
     def compress_history(self, session_id: str, summary: str, n_messages: int) -> dict[str, int]:
         record = self._read_session_file(session_id)
         messages = record.get("messages", [])
-        archived = messages[:n_messages]
-        remaining = messages[n_messages:]
-
+        archived = messages[:n_messages] # 前一半要归档
+        remaining = messages[n_messages:] # 后一半保留
+        # 原始消息归档到磁盘
         archive_path = self.archive_dir / f"{session_id}_{int(time.time())}.json"
         archive_payload = {
             "session_id": session_id,
@@ -173,13 +173,13 @@ class SessionManager:
             json.dumps(archive_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
+        # 摘要拼接到 compressed_context
         existing_summary = record.get("compressed_context", "").strip()
         if existing_summary:
             record["compressed_context"] = f"{existing_summary}\n---\n{summary.strip()}"
         else:
             record["compressed_context"] = summary.strip()
-        record["messages"] = remaining
+        record["messages"] = remaining# 只保留后一半
         self._write_session(record)
         return {
             "archived_count": len(archived),

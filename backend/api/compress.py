@@ -18,7 +18,7 @@ async def compress_session(session_id: str) -> dict[str, int]:
     if len(messages) < 4:
         raise HTTPException(status_code=400, detail="At least 4 messages are required")
 
-    n_messages = max(4, len(messages) // 2)
-    summary = await agent_manager.summarize_history(messages[:n_messages])
-    result = session_manager.compress_history(session_id, summary, n_messages)
+    n_messages = max(4, len(messages) // 2)  # 取前一半（至少4条）
+    summary = await agent_manager.summarize_history(messages[:n_messages])# LLM生成摘要
+    result = session_manager.compress_history(session_id, summary, n_messages)# 存摘要+归档
     return result

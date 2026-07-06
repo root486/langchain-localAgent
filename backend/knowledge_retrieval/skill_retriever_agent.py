@@ -24,13 +24,14 @@ class SkillRetrieverAgent:
     def configure(self, base_dir, model_builder) -> None:
         self.base_dir = base_dir
         self._model_builder = model_builder
-
+    #从 LLM 输出的文本中提取出有用的 JSON 字典。
     def _extract_json(self, text: str) -> dict[str, Any]:
-        stripped = text.strip()
+        stripped = text.strip()#去掉首尾空白
         candidates = [stripped]
+        #扔掉废话 → 只保留 JSON 数据
         match = JSON_BLOCK_PATTERN.search(stripped)
         if match:
-            candidates.insert(0, match.group(1))
+            candidates.insert(0, match.group(1))#取第一个括号匹配到的内容->{json 数据}
 
         start = stripped.find("{")
         end = stripped.rfind("}")
@@ -39,20 +40,20 @@ class SkillRetrieverAgent:
 
         for candidate in candidates:
             try:
-                payload = json.loads(candidate)
+                payload = json.loads(candidate) # 尝试解析成 Python 对象
             except json.JSONDecodeError:
                 continue
-            if isinstance(payload, dict):
+            if isinstance(payload, dict): # 解析成功，且是字典
                 return payload
         return {}
-
+    #从 Agent 的工具调用记录中，用正则匹配 + JSON 解析两种方式提取文件路径，去重清洗后返回路径列表，用于构建 narrowed_paths 帮助后续检索缩小范围。
     def _extract_paths(self, tool_calls: list[dict[str, str]]) -> list[str]:
-        paths: list[str] = []
-        seen: set[str] = set()
+        paths: list[str] = []# 结果列表，存最终要返回的路径（有序，可重复检查）
+        seen: set[str] = set() # 集合，记录已经添加过的路径（快速查重）
 
         def add_path(value: str) -> None:
-            normalized = value.strip().rstrip(".,:;)]}>")
-            if not normalized or normalized in seen:
+            normalized = value.strip().rstrip(".,:;)]}>")#去掉前后空白和标点符号
+            if not normalized or normalized in seen:  # ← 用 seen 快速查重
                 return
             seen.add(normalized)
             paths.append(normalized)
@@ -67,12 +68,13 @@ class SkillRetrieverAgent:
                 payload = json.loads(raw_input)
             except json.JSONDecodeError:
                 payload = {}
-            path_value = payload.get("path")
+            path_value = payload.get("path")#精确提取
             if isinstance(path_value, str):
                 add_path(path_value)
         return paths
-
+    #从多个来源收集文件类型信息，去重返回。
     def _normalize_types(self, value: Any, evidences: list[Evidence], searched_paths: list[str]) -> list[str]:
+        #value：LLM 返回的原始类型数据（可能是列表）evidences：已检索到的证据对象列表searched_paths：搜索过的文件路径列表
         candidates: list[str] = []
         if isinstance(value, list):
             candidates.extend(str(item).strip().lower() for item in value if str(item).strip())
@@ -85,11 +87,11 @@ class SkillRetrieverAgent:
                 candidates.append(suffix)
 
         aliases = {"xlsx": "excel", "xls": "excel"}
-        normalized: list[str] = []
-        seen: set[str] = set()
+        normalized: list[str] = []#最终去重后的结果列表
+        seen: set[str] = set()#集合，记录已经添加过的文件类型（快速查重）
         for candidate in candidates:
-            mapped = aliases.get(candidate, candidate)
-            if mapped and mapped not in seen:
+            mapped = aliases.get(candidate, candidate)#根据映射表，将文件类型转换为标准格式（将xlsx和xls -> excel）
+            if mapped and mapped not in seen:  # ← 用 seen 快速查重 
                 seen.add(mapped)
                 normalized.append(mapped)
         return normalized

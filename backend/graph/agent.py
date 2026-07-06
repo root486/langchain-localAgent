@@ -141,7 +141,7 @@ class AgentManager:
                 for item in results
             ],
         }
-
+    #把知识库检索结果格式化成文本，塞给 AI 当上下文用。
     def _format_knowledge_context(self, retrieval_result) -> str:
         lines = ["[Knowledge retrieval evidence]"]
         lines.append(f"Status: {retrieval_result.status}")
@@ -338,7 +338,7 @@ class AgentManager:
             return title[:10] or "新会话"
         except Exception:
             return (first_user_message.strip() or "新会话")[:10]
-
+    #摘要压缩
     async def summarize_history(self, messages: list[dict[str, Any]]) -> str:
         prompt = (
             "请将以下对话压缩成中文摘要，控制在 500 字以内。"

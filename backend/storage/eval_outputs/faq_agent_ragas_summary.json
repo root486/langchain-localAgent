@@ -1,26 +1,18 @@
 {
   "enabled": true,
-  "mode": "full",
+  "mode": "basic",
   "metrics": [
     "id_based_context_precision",
     "id_based_context_recall",
     "non_llm_context_precision_with_reference",
-    "non_llm_context_recall",
-    "faithfulness",
-    "llm_context_precision_without_reference",
-    "semantic_similarity",
-    "answer_relevancy"
+    "non_llm_context_recall"
   ],
   "skipped_metrics": [],
   "summary_scores": {
-    "id_based_context_precision": 0.5,
+    "id_based_context_precision": 0.3333333333333333,
     "id_based_context_recall": 1.0,
-    "non_llm_context_precision_with_reference": 0.749999999925,
-    "non_llm_context_recall": 1.0,
-    "faithfulness": 0.8709677419354839,
-    "llm_context_precision_without_reference": 0.749999999925,
-    "semantic_similarity": 0.7289496595245404,
-    "answer_relevancy": 0.41863045365390583
+    "non_llm_context_precision_with_reference": 0.83333333325,
+    "non_llm_context_recall": 1.0
   },
   "error": ""
 }

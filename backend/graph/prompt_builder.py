@@ -5,20 +5,20 @@ from pathlib import Path
 from config import get_settings
 
 SYSTEM_COMPONENTS: tuple[tuple[str, str], ...] = (
-    ("Skills Snapshot", "SKILLS_SNAPSHOT.md"),
-    ("Soul", "workspace/SOUL.md"),
-    ("Identity", "workspace/IDENTITY.md"),
-    ("User Profile", "workspace/USER.md"),
-    ("Agents Guide", "workspace/AGENTS.md"),
-    ("Long-term Memory", "memory/MEMORY.md"),
+    ("Skills Snapshot", "SKILLS_SNAPSHOT.md"), # 技能快照
+    ("Soul", "workspace/SOUL.md"),#人格
+    ("Identity", "workspace/IDENTITY.md"),#身份
+    ("User Profile", "workspace/USER.md"),#用户画像
+    ("Agents Guide", "workspace/AGENTS.md"),#智能体指南
+    ("Long-term Memory", "memory/MEMORY.md"),#长期记忆
 )
-
+#有检索证据时优先用。
 RUNTIME_OVERRIDE = """<!-- Runtime Override -->
 When explicit retrieval evidence is provided for the current request, prioritize that evidence.
 Do not assume missing evidence exists elsewhere.
 """
 
-
+#截断文本，防止文件太长
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -37,6 +37,7 @@ def build_system_prompt(base_dir: Path, rag_mode: bool) -> str:
     parts: list[str] = []
 
     for label, relative_path in SYSTEM_COMPONENTS:
+        #如果是长期记忆文件且开启了 RAG，不读文件内容，而是插入一段提示——告诉 LLM "记忆会动态注入，别自己猜"。
         if rag_mode and relative_path == "memory/MEMORY.md":
             parts.append(
                 "<!-- Long-term Memory -->\n"

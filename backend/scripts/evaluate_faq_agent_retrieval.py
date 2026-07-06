@@ -556,8 +556,11 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         entries = entries[: args.limit]
 
     from graph.agent import agent_manager
+    from knowledge_retrieval import knowledge_indexer
 
     agent_manager.initialize(backend_dir)
+    knowledge_indexer.configure(backend_dir)
+    knowledge_indexer.rebuild_index()
 
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
 
