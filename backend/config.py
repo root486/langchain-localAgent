@@ -70,6 +70,11 @@ class Settings:
     embedding_model: str
     embedding_api_key: str | None
     embedding_base_url: str
+    redis_url: str = ""
+    summary_model: str = ""
+    summary_api_key: str = ""
+    summary_base_url: str = "https://api.deepseek.com"
+    max_context_tokens: int = 32_000
     component_char_limit: int = 20_000
     terminal_timeout_seconds: int = 30
 
@@ -233,6 +238,11 @@ def get_settings() -> Settings:
         embedding_model=_resolve_embedding_model(embedding_provider),
         embedding_api_key=_resolve_embedding_api_key(embedding_provider),
         embedding_base_url=_resolve_embedding_base_url(embedding_provider),
+        redis_url=_first_config_value("REDIS_URL") or "",
+        summary_model=_first_config_value("SUMMARY_MODEL") or "deepseek-v4-flash",
+        summary_api_key=_first_config_value("SUMMARY_API_KEY") or "",
+        summary_base_url=_first_config_value("SUMMARY_BASE_URL") or "https://api.deepseek.com",
+        max_context_tokens=int(_first_config_value("MAX_CONTEXT_TOKENS") or "128000"),
     )
 
 

@@ -8,8 +8,6 @@ SYSTEM_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("Skills Snapshot", "SKILLS_SNAPSHOT.md"), # 技能快照
     ("Soul", "workspace/SOUL.md"),#人格
     ("Identity", "workspace/IDENTITY.md"),#身份
-    ("User Profile", "workspace/USER.md"),#用户画像
-    ("Agents Guide", "workspace/AGENTS.md"),#智能体指南
     ("Long-term Memory", "memory/MEMORY.md"),#长期记忆
 )
 #有检索证据时优先用。
@@ -48,6 +46,13 @@ def build_system_prompt(base_dir: Path, rag_mode: bool) -> str:
 
         content = _read_component(base_dir, relative_path, settings.component_char_limit)
         parts.append(f"<!-- {label} -->\n{content}")
+
+    # Redis 用户偏好（动态更新，不依赖索引重建）
+    from cache.user_prefs import get_all, to_prompt_text
+    prefs = get_all()
+    if prefs:
+        prefs_text = to_prompt_text(prefs)
+        parts.append(f"<!-- User Preferences -->\n{prefs_text}")
 
     parts.append(RUNTIME_OVERRIDE)
     return "\n\n".join(parts)

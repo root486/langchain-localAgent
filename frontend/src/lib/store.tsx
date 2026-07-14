@@ -3,7 +3,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import {
-  compressSession,
   createSession,
   deleteSession,
   getKnowledgeIndexStatus,
@@ -63,7 +62,6 @@ type AppStore = {
   loadInspectorFile: (path: string) => Promise<void>;
   updateInspectorContent: (value: string) => void;
   saveInspector: () => Promise<void>;
-  compressCurrentSession: () => Promise<void>;
   rebuildKnowledgeIndex: () => Promise<void>;
   setSidebarWidth: (width: number) => void;
   setInspectorWidth: (width: number) => void;
@@ -72,8 +70,6 @@ type AppStore = {
 const FIXED_FILES = [
   "workspace/SOUL.md",
   "workspace/IDENTITY.md",
-  "workspace/USER.md",
-  "workspace/AGENTS.md",
   "memory/MEMORY.md",
   "SKILLS_SNAPSHOT.md"
 ];
@@ -394,15 +390,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await refreshSkills();
   }
 
-  async function compressCurrentSession() {
-    if (!currentSessionId) {
-      return;
-    }
-    await compressSession(currentSessionId);
-    await refreshSessionDetails(currentSessionId);
-    await refreshSessions();
-  }
-
   async function rebuildKnowledgeIndex() {
     await rebuildKnowledgeIndexRequest();
     await refreshKnowledgeIndexStatus();
@@ -473,7 +460,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     loadInspectorFile,
     updateInspectorContent,
     saveInspector,
-    compressCurrentSession,
     rebuildKnowledgeIndex,
     setSidebarWidth,
     setInspectorWidth

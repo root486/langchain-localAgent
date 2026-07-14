@@ -3,13 +3,36 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import tiktoken
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from graph.agent import agent_manager
+from graph.prompt_builder import build_system_prompt
+from config import get_settings, runtime_config
 
 router = APIRouter()
+
+# 达到模型上下文窗口的 80% 时自动触发压缩
+AUTO_COMPRESS_RATIO = 0.8
+_token_encoder = tiktoken.get_encoding("cl100k_base")
+
+
+def _count_tokens(text: str) -> int:
+    return len(_token_encoder.encode(text or ""))
+
+
+def _total_tokens(messages: list[dict]) -> int:
+    """计算发给 LLM 的全部内容 token 数：system prompt + 消息全量"""
+    base_dir = agent_manager.base_dir
+    system_text = (
+        build_system_prompt(base_dir, runtime_config.get_rag_mode())
+        if base_dir else ""
+    )
+    # 整段序列化，包含 content + tool_calls + retrieval_steps
+    msg_text = json.dumps(messages, ensure_ascii=False, default=str)
+    return _count_tokens(system_text) + _count_tokens(msg_text)
 
 
 class ChatRequest(BaseModel):
@@ -124,6 +147,22 @@ async def chat(payload: ChatRequest):
                     if not current_segment["content"].strip() and event.get("content"):
                         current_segment["content"] = event["content"]
                     persist_segments()
+                    # ---------- 自动压缩 ----------
+                    # 标准做法：计算全量 token（system + content + tool_calls + retrieval_steps），
+                    # 达到模型上下文窗口的 80% 时自动触发摘要压缩。
+                    try:
+                        record = session_manager.get_history(payload.session_id)
+                        messages = record.get("messages", [])
+                        current_tokens = _total_tokens(messages)
+                        limit = get_settings().max_context_tokens
+                        threshold = int(limit * AUTO_COMPRESS_RATIO)
+                        if current_tokens > threshold and len(messages) >= 4:
+                            n = min(len(messages) // 2, max(4, len(messages) - 2))
+                            summary = await agent_manager.summarize_history(messages[:n])
+                            session_manager.compress_history(payload.session_id, summary, n)
+                    except Exception:
+                        pass
+                    # ----------------------------------
                 #从事件中去掉 type 字段，只保留 SSE 事件需要的字段。
                 data = {key: value for key, value in event.items() if key != "type"}
                 yield _sse(event_type, data)

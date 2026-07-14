@@ -12,6 +12,24 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from config import get_settings
 
 
+# Monkey-patch: 允许非 OpenAI 官方的 embedding 模型名（如 Bailian 的 text-embedding-v4）
+# 详见 knowledge_retrieval/indexer.py 中同名补丁的注释
+def _patch_llama_index_get_engine() -> None:
+    import llama_index.embeddings.openai.base as _embed_base
+    _orig = _embed_base.get_engine
+
+    def _patched(mode: str, model: str, mode_model_dict: dict) -> str:
+        try:
+            return _orig(mode, model, mode_model_dict)
+        except ValueError:
+            return model
+
+    _embed_base.get_engine = _patched
+
+
+_patch_llama_index_get_engine()
+
+
 class MemoryIndexer:
     def __init__(self) -> None:
         self.base_dir: Path | None = None

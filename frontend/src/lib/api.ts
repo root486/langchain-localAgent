@@ -157,12 +157,6 @@ export async function setRagMode(enabled: boolean) {
   });
 }
 
-export async function compressSession(sessionId: string) {
-  return request<{ archived_count: number; remaining_count: number }>(
-    `/sessions/${sessionId}/compress`,
-    { method: "POST" }
-  );
-}
 
 export async function getKnowledgeIndexStatus() {
   return request<KnowledgeIndexStatus>("/knowledge/index/status");

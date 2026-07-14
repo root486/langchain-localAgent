@@ -16,9 +16,34 @@ from config import get_settings
 from knowledge_retrieval.types import Evidence, IndexStatus
 
 
+# Monkey-patch: 允许非 OpenAI 官方的 embedding 模型名（如 Bailian 的 text-embedding-v4）
+# LlamaIndex 的 OpenAIEmbedding 会在构造时校验模型名是否在 OpenAIEmbeddingModelType 枚举中，
+# 导致第三方兼容 API 的模型名被拒绝。此补丁让 get_engine 在遇到未知模型名时直接返回模型名。
+def _patch_llama_index_get_engine() -> None:
+    import llama_index.embeddings.openai.base as _embed_base
+    _orig = _embed_base.get_engine
+
+    def _patched(mode: str, model: str, mode_model_dict: dict) -> str:
+        try:
+            return _orig(mode, model, mode_model_dict)
+        except ValueError:
+            return model
+
+    _embed_base.get_engine = _patched
+
+
+_patch_llama_index_get_engine()
+
+
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*)$")
 ALNUM_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 CHINESE_BLOCK_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
+# \u53e5\u5b50\u8fb9\u754c\uff1a\u4e2d\u6587\u6807\u70b9\u6216\u6362\u884c\u540e\u7684\u975e\u7a7a\u884c\u9996
+SENT_BOUNDARY = re.compile(r"[\u3002\uff01\uff1f\uff1b\n](?=\S)")
+# \u4e0a\u4e0b\u6587\u7a97\u53e3\u4e0a\u9650\uff08\u5b57\u7b26\u6570\uff09\uff1aP95 \u7684 parent_text \u4e3a 1357\uff0c\u53d6 1500 \u8986\u76d6\u7edd\u5927\u90e8\u5206\u573a\u666f
+MAX_CONTEXT_CHARS = 1500
+# \u6700\u5c0f chunk \u5927\u5c0f\uff1a\u4f4e\u4e8e\u6b64\u503c\u7684\u76f8\u90bb\u540c parent chunk \u4f1a\u88ab\u5408\u5e76
+MIN_CHUNK_SIZE = 60
 
 
 class KnowledgeIndexer:
@@ -81,6 +106,7 @@ class KnowledgeIndexer:
             api_key=settings.embedding_api_key,
             api_base=settings.embedding_base_url,
             model=settings.embedding_model,
+            embed_batch_size=10,  # 百炼 text-embedding-v4 限制最大 10
         )
 
     def status(self) -> IndexStatus:
@@ -134,72 +160,60 @@ class KnowledgeIndexer:
     def _split_markdown(self, path: Path) -> list[dict[str, Any]]:
         text = path.read_text(encoding="utf-8")
         source_path = self._relative_path(path)
-        sections: list[tuple[list[str], list[str]]] = []# 存结果：[(标题层级链, 内容行)]
-        heading_stack: list[str] = []# 标题栈，跟踪当前在哪个标题层级下
-        current_lines: list[str] = []# 当前标题下的内容行
+        sections: list[tuple[list[str], list[str]]] = []
+        heading_stack: list[str] = []
+        current_lines: list[str] = []
 
-        # 把当前积累的内容存为一个section
         def flush_section() -> None:
             if not current_lines:
                 return
             heading_path = heading_stack[:] if heading_stack else [path.stem]
             sections.append((heading_path, current_lines[:]))
-        #把 Markdown 文件按标题切成多块，每块知道自己在标题树的哪个位置。
-        for raw_line in text.splitlines():
-            match = HEADING_PATTERN.match(raw_line) # 匹配 # 标题
-            if not match:
-                current_lines.append(raw_line)# 非标题行，加入当前内容
-                continue
 
-            flush_section() # 遇到新标题，把之前的内容存起来
-            current_lines = [raw_line]# ##标题，重置当前内容
+        for raw_line in text.splitlines():
+            match = HEADING_PATTERN.match(raw_line)
+            if not match:
+                current_lines.append(raw_line)
+                continue
+            flush_section()
+            current_lines = [raw_line]
             level = len(match.group(1))
             title = match.group(2).strip()
-            heading_stack = heading_stack[: level - 1]#先弹回到上级（[:level-1]）
-            heading_stack.append(title)#再进入新标题（append）
+            heading_stack = heading_stack[: level - 1]
+            heading_stack.append(title)
 
         flush_section()
-        # sections示例: [(["常见问题"], ["# 常见问题", ""]), (["常见问题", "退货"], ["## 退货", "退货政策..."]), (["常见问题", "退货", "退货流程"],        ["### 退货流程", "先联系客服，再寄回商品。"])]
-        # 标题树:  常见问题
-        #          ├── 退货
-        #          │   ├── 退货流程
-        #          │   └── 退货条件
-        #          └── 换货
         if not sections:
-            sections = [([path.stem], text.splitlines())]#如果文件没有任何标题，整个文件作为一块，用文件名当标签。
+            sections = [([path.stem], text.splitlines())]
 
-        chunks: list[dict[str, Any]] = []
+        raw_chunks: list[dict[str, Any]] = []
         for section_index, (heading_path, lines) in enumerate(sections, start=1):
-            section_text = "\n".join(lines).strip()#把内容行用换行符拼成一段文本。
+            section_text = "\n".join(lines).strip()
             if not section_text:
                 continue
-            parent_id = f"{source_path}::{' > '.join(heading_path)}"#生成 parent_id，比如 "knowledge/faq.md::常见问题 > 退货"
-            paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", section_text) if part.strip()]#按空行切开，切开后 → ["第一段内容", "第二段内容", "第三段内容"]
-            if not paragraphs:
-                paragraphs = [section_text]
+            parent_id = f"{source_path}::{' > '.join(heading_path)}"
+            # ---------- 优化 3：过长片段拆分 ----------
+            # 不在 1200 字符处硬切，而是找到最近的句子边界（。！？；换行）再切
+            slices = self._split_long_text(section_text)
+            for si, slice_text in enumerate(slices, start=1):
+                locator = f"{' > '.join(heading_path)}"
+                if len(slices) > 1:
+                    locator = f"{locator} (片段 {si}/{len(slices)})"
+                raw_chunks.append(
+                    {
+                        "parent_id": parent_id,
+                        "source_path": source_path,
+                        "source_type": "md",
+                        "locator": locator,
+                        "text": slice_text,
+                        "parent_text": section_text,
+                        "section_index": section_index,
+                    }
+                )
+        # ---------- 优化 4：过短片段合并 ----------
+        # 同 parent 内，相邻 chunk 如果任一小于 MIN_CHUNK_SIZE，合并它们
+        return self._merge_short_chunks(raw_chunks, source_path)
 
-            for paragraph_index, paragraph in enumerate(paragraphs, start=1):
-                content = paragraph.strip()
-                if not content:
-                    continue
-                slices = [content[index : index + 1200] for index in range(0, len(content), 1200)] or [content]#每1200字符切一块
-                for slice_index, slice_text in enumerate(slices, start=1):
-                    locator = f"{' > '.join(heading_path)} / 段落 {paragraph_index}"#生成位置描述。比如 "常见问题 > 退货 / 段落 1"
-                    if len(slices) > 1:
-                        locator = f"{locator}.{slice_index}"#如果超长被切成了多片，加序号区分："常见问题 > 退货 / 段落 1.1"
-                    chunks.append(
-                        {
-                            "doc_id": f"{parent_id}::child::{paragraph_index}.{slice_index}",
-                            "parent_id": parent_id,
-                            "source_path": source_path,
-                            "source_type": "md",
-                            "locator": locator,
-                            "text": slice_text,
-                            "parent_text": section_text,
-                            "section_index": section_index,
-                        }
-                    )
-        return chunks
 
     def _split_json(self, path: Path) -> list[dict[str, Any]]:
         source_path = self._relative_path(path)
@@ -219,32 +233,100 @@ class KnowledgeIndexer:
                 continue
 
             record_id = str(item.get("record_id") or item.get("id") or index)
-            locator = f"记录 {record_id}"
-            parts = []
-            if question:
-                parts.append(f"Question: {question}")
-            if answer:
-                parts.append(f"Answer: {answer}")
+            parent_id = f"{source_path}::record::{record_id}"
+            parts = [f"Question: {question}", f"Answer: {answer}"]
             if label:
                 parts.append(f"Label: {label}")
             if url:
                 parts.append(f"URL: {url}")
-            text = "\n".join(parts)
-            parent_id = f"{source_path}::record::{record_id}"
-            chunks.append(
-                {
-                    "doc_id": f"{parent_id}::child::1",
-                    "parent_id": parent_id,
-                    "source_path": source_path,
-                    "source_type": "json",
-                    "locator": locator,
-                    "text": text,
-                    "parent_text": text,
-                    "record_id": record_id,
-                }
-            )
+            parent_text = "\n".join(parts)
+            # 长 answer 按句子边界拆分子 chunk
+            slices = self._split_long_text(parent_text)
+            for si, slice_text in enumerate(slices, start=1):
+                locator = f"记录 {record_id}"
+                if len(slices) > 1:
+                    locator = f"{locator} (片段 {si}/{len(slices)})"
+                chunks.append(
+                    {
+                        "doc_id": f"{parent_id}::child::{si}",
+                        "parent_id": parent_id,
+                        "source_path": source_path,
+                        "source_type": "json",
+                        "locator": locator,
+                        "text": slice_text,
+                        "parent_text": parent_text,
+                        "record_id": record_id,
+                    }
+                )
         return chunks
-    #把所有 chunk 数据存到磁盘文件 manifest.json。
+    # ---------- 父子 chunk 工具方法 ----------
+
+    @staticmethod
+    def _split_long_text(text: str, chunk_size: int = 1200) -> list[str]:
+        """在句子边界处切分长文本，避免在句中硬切。
+
+        找到 chunk_size 范围内最后一个句子终止符（。！？；\\n），在此处切开。
+        如果找不到边界，回退到 chunk_size 处硬切（兼容超长无标点的文本）。
+        """
+        if len(text) <= chunk_size:
+            return [text]
+
+        slices: list[str] = []
+        pos = 0
+        while pos < len(text):
+            end = min(pos + chunk_size, len(text))
+            if end >= len(text):
+                slices.append(text[pos:].strip())
+                break
+            # 在 [pos, end] 范围内找最后一个句子边界
+            window = text[pos:end]
+            boundary = -1
+            for m in SENT_BOUNDARY.finditer(window):
+                boundary = m.start() + 1  # 在标点符号之后切
+            if boundary > chunk_size // 3:
+                # 找到了合理的边界（至少超过 1/3 chunk_size，避免太碎）
+                end = pos + boundary
+            slices.append(text[pos:end].strip())
+            pos = end
+        return [s for s in slices if s]
+
+    def _merge_short_chunks(
+        self, chunks: list[dict[str, Any]], source_path: str
+    ) -> list[dict[str, Any]]:
+        """合并同 parent 内过短的相邻 chunk。
+
+        如果 chunk A 或 chunk B 任一小于 MIN_CHUNK_SIZE，将它们合并。
+        合并后的 chunk 保留靠前的 locator，用于追溯位置。
+        """
+        if len(chunks) <= 1:
+            return self._assign_doc_ids(chunks, source_path)
+
+        merged: list[dict[str, Any]] = []
+        prev = chunks[0]
+        for cur in chunks[1:]:
+            same_parent = prev["parent_id"] == cur["parent_id"]
+            too_short = (
+                len(prev["text"]) < MIN_CHUNK_SIZE
+                or len(cur["text"]) < MIN_CHUNK_SIZE
+            )
+            if same_parent and too_short:
+                # 合并：文本拼接，保留 prev 的 locator
+                prev["text"] = prev["text"] + "\n\n" + cur["text"]
+            else:
+                merged.append(prev)
+                prev = cur
+        merged.append(prev)
+        return self._assign_doc_ids(merged, source_path)
+
+    @staticmethod
+    def _assign_doc_ids(
+        chunks: list[dict[str, Any]], source_path: str
+    ) -> list[dict[str, Any]]:
+        """为合并后的 chunk 重新分配 doc_id，保持唯一性。"""
+        for i, c in enumerate(chunks, start=1):
+            c["doc_id"] = f"{c['parent_id']}::child::{i}"
+        return chunks
+    # ---------- 持久化 ----------
     def _write_manifest(self) -> None:
         payload = {
             "built_at": time.time(),
@@ -297,6 +379,7 @@ class KnowledgeIndexer:
 
         try:
             LlamaSettings.embed_model = self._build_embed_model()#配置Embedding模型
+            print(f"[索引] 正在向量化 {len(self._documents)} 个 chunk（批大小=50）...")
             #把每个 chunk 转成 LlamaIndex 的 Document 对象。text 是要转向量的文本，metadata 是附带信息，检索结果里会原样返回。
             documents = [
                 Document(
@@ -314,7 +397,11 @@ class KnowledgeIndexer:
             self._vector_index = VectorStoreIndex.from_documents(documents)#LlamaIndex 对每个 Document 的 text 调用 Embedding 模型，转成向量，建索引。
             self._vector_index.storage_context.persist(persist_dir=str(self._vector_dir))#把索引存到 storage/knowledge/vector/ 目录，下次启动不用重建。
             self._vector_ready = True
-        except Exception:
+            print(f"[索引] 向量化完成，已持久化到 {self._vector_dir}")
+        except Exception as exc:
+            print(f"[索引] 向量化失败: {exc}")
+            import traceback
+            traceback.print_exc()
             self._vector_index = None
             self._vector_ready = False
 
@@ -355,6 +442,63 @@ class KnowledgeIndexer:
                 return True
         return False
 
+    # ---------- 上下文窗口（父子 chunk 检索核心） ----------
+
+    def _build_context_window(self, hit_doc: dict[str, Any]) -> str:
+        """以命中的子 chunk 为中心，向同 parent 的兄弟 chunk 扩展，构建上下文。
+
+        解决的问题：
+        - 返回单个子 chunk（~1200 字符）→ 信息被拦腰切断
+        - 返回整个 parent_text（最大 2632 字符）→ 太长，噪声多
+        - 本方法折中：从命中点向左右扩展，累计到 MAX_CONTEXT_CHARS 就停
+
+        manifest 实际数据：P75=595, P95=1357, max=2632。
+        MAX_CONTEXT_CHARS=1500 覆盖了 95% 的完整 parent，只有极少数超长 section 需要窗口化。
+        """
+        parent_id = hit_doc.get("parent_id", "")
+        # 找到同 parent 的所有兄弟 chunk（按 doc_id 自然排序）
+        siblings = [
+            d for d in self._documents if d.get("parent_id") == parent_id
+        ]
+        if len(siblings) <= 1:
+            return str(hit_doc.get("text", ""))
+        # 按 doc_id 排序确保文本顺序正确
+        siblings.sort(key=lambda d: str(d.get("doc_id", "")))
+        # 定位命中 chunk 的位置
+        hit_doc_id = hit_doc.get("doc_id", "")
+        hit_idx = next(
+            (i for i, d in enumerate(siblings) if d.get("doc_id") == hit_doc_id),
+            0,
+        )
+        # 从命中点向两边扩展
+        left = hit_idx
+        right = hit_idx
+        total = len(str(siblings[hit_idx].get("text", "")))
+        while total < MAX_CONTEXT_CHARS:
+            expanded = False
+            # 先向左扩一段
+            if left > 0:
+                left -= 1
+                total += len(str(siblings[left].get("text", "")))
+                expanded = True
+                if total >= MAX_CONTEXT_CHARS:
+                    break
+            # 再向右扩一段
+            if right < len(siblings) - 1:
+                right += 1
+                total += len(str(siblings[right].get("text", "")))
+                expanded = True
+                if total >= MAX_CONTEXT_CHARS:
+                    break
+            if not expanded:  # 左右都到边界了
+                break
+        parts = [
+            str(siblings[i].get("text", "")) for i in range(left, right + 1)
+        ]
+        return "\n\n".join(parts).strip()
+
+    # ---------- 检索 ----------
+
     def retrieve_vector(
         self,
         query: str,
@@ -373,21 +517,36 @@ class KnowledgeIndexer:
             return []
 
         payload: list[Evidence] = []
+        seen_parents: set[str] = set()  # 按 parent 去重
         for item in results:
             node = getattr(item, "node", item)
             metadata = getattr(node, "metadata", {}) or {}
             source_path = str(metadata.get("source_path", ""))
             if not self._matches_path_filters(source_path, path_filters):
                 continue
-            text = getattr(node, "text", "") or getattr(node, "get_content", lambda: "")()
+            doc_id = str(metadata.get("doc_id", ""))
             raw_parent_id = metadata.get("parent_id")
             parent_id = str(raw_parent_id).strip() if raw_parent_id else None
+            # 同一 parent 只保留最高分的一个结果
+            if parent_id and parent_id in seen_parents:
+                continue
+            if parent_id:
+                seen_parents.add(parent_id)
+            # 找到 manifest 中对应的 chunk，用于构建上下文窗口
+            hit_doc = next(
+                (d for d in self._documents if d.get("doc_id") == doc_id), None
+            )
+            snippet = (
+                self._build_context_window(hit_doc)
+                if hit_doc
+                else str(metadata.get("parent_text", ""))
+            )
             payload.append(
                 Evidence(
                     source_path=source_path,
                     source_type=str(metadata.get("source_type", "unknown")),
                     locator=str(metadata.get("locator", "")),
-                    snippet=str(text).strip(),
+                    snippet=snippet,
                     channel="vector",
                     score=float(getattr(item, "score", 0.0) or 0.0),
                     parent_id=parent_id,
@@ -446,15 +605,22 @@ class KnowledgeIndexer:
 
         scores.sort(key=lambda item: item[1], reverse=True)
         payload: list[Evidence] = []
+        seen_parents: set[str] = set()
         for item, score in scores[:top_k]:
             raw_parent_id = item.get("parent_id")
             parent_id = str(raw_parent_id).strip() if raw_parent_id else None
+            # 同一 parent 只保留最高分的一个结果
+            if parent_id and parent_id in seen_parents:
+                continue
+            if parent_id:
+                seen_parents.add(parent_id)
+            snippet = self._build_context_window(item)
             payload.append(
                 Evidence(
                     source_path=str(item["source_path"]),
                     source_type=str(item["source_type"]),
                     locator=str(item["locator"]),
-                    snippet=str(item["text"]).strip(),
+                    snippet=snippet,
                     channel="bm25",
                     score=score,
                     parent_id=parent_id,

@@ -339,10 +339,24 @@ class AgentManager:
         except Exception:
             return (first_user_message.strip() or "新会话")[:10]
     #摘要压缩
+    def _build_summary_model(self):
+        """摘要压缩专用模型：默认走 DeepSeek Flash，便宜且摘要不需要强推理。
+        未配置 SUMMARY_API_KEY 时回退到主模型。"""
+        settings = get_settings()
+        if settings.summary_api_key:
+            return ChatOpenAI(
+                model=settings.summary_model,
+                api_key=settings.summary_api_key,
+                base_url=settings.summary_base_url,
+                temperature=0,
+            )
+        return self._build_chat_model()
+
     async def summarize_history(self, messages: list[dict[str, Any]]) -> str:
         prompt = (
-            "请将以下对话压缩成中文摘要，控制在 500 字以内。"
-            "重点保留用户目标、已完成步骤、重要结论和未解决事项。"
+            "请将以下对话压缩成中文摘要，控制在 200 字以内。"
+            "只保留关键事实：用户是谁、做了什么决定、还有哪些未解决问题。"
+            "丢弃闲聊、工具调用和检索过程。"
         )
         lines: list[str] = []
         for item in messages:
@@ -353,14 +367,14 @@ class AgentManager:
         transcript = "\n".join(lines)
 
         try:
-            response = await self._build_chat_model().ainvoke(
+            response = await self._build_summary_model().ainvoke(
                 [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": transcript},
                 ]
             )
             summary = _stringify_content(getattr(response, "content", "")).strip()
-            return summary[:500]
+            return summary[:200]
         except Exception:
             return transcript[:500]
 

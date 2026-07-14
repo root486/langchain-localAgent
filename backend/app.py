@@ -6,7 +6,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.chat import router as chat_router
-from api.compress import router as compress_router
 from api.config_api import router as config_router
 from api.files import router as files_router
 from api.knowledge_index import router as knowledge_index_router
@@ -27,7 +26,8 @@ async def lifespan(_: FastAPI):
     memory_indexer.configure(settings.backend_dir)
     memory_indexer.rebuild_index()
     knowledge_indexer.configure(settings.backend_dir)
-    knowledge_indexer.rebuild_index()
+    if not knowledge_indexer.status().ready:
+        knowledge_indexer.rebuild_index()
     yield
 
 
@@ -49,7 +49,6 @@ app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(sessions_router, prefix="/api", tags=["sessions"])
 app.include_router(files_router, prefix="/api", tags=["files"])
 app.include_router(tokens_router, prefix="/api", tags=["tokens"])
-app.include_router(compress_router, prefix="/api", tags=["compress"])
 app.include_router(config_router, prefix="/api", tags=["config"])
 app.include_router(knowledge_index_router, prefix="/api", tags=["knowledge"])
 

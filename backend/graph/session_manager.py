@@ -6,14 +6,47 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from cache.redis_client import redis_client
+
+# Redis 会话 TTL（秒）
+SESSION_REDIS_TTL = 86400 * 7  # 7 天
+
 
 class SessionManager:
+    """会话管理：Redis 热存储 + JSON 文件冷存储。
+
+    Redis 不可用时自动降级为纯文件模式，不影响现有功能。
+    
+    """
+
     def __init__(self, base_dir: Path) -> None:
         self.base_dir = base_dir
         self.sessions_dir = base_dir / "sessions"
         self.archive_dir = self.sessions_dir / "archive"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir.mkdir(parents=True, exist_ok=True)#用来存放被压缩掉的旧消息
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- Redis helpers ----------
+
+    @staticmethod
+    def _redis_key(session_id: str) -> str:
+        return f"session:{session_id}"
+
+    def _redis_read(self, session_id: str) -> dict[str, Any] | None:
+        raw = redis_client.get(self._redis_key(session_id))
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    def _redis_write(self, record: dict[str, Any]) -> None:
+        redis_client.set(
+            self._redis_key(str(record["id"])),
+            json.dumps(record, ensure_ascii=False),
+            ttl=SESSION_REDIS_TTL,
+        )
 
     def _session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}.json"
@@ -30,6 +63,11 @@ class SessionManager:
         }
 
     def _read_session_file(self, session_id: str) -> dict[str, Any]:
+        # 优先从 Redis 热层读取
+        cached = self._redis_read(session_id)
+        if cached is not None:
+            return cached
+        # 降级到磁盘文件
         path = self._session_path(session_id)
         if not path.exists():
             record = self._default_record(session_id)
@@ -37,7 +75,6 @@ class SessionManager:
             return record
 
         raw = json.loads(path.read_text(encoding="utf-8"))
-        #兼容旧版本数据，如果是消息列表格式，则转换为完整记录格式
         if isinstance(raw, list):
             record = self._default_record(session_id)
             record["messages"] = raw
@@ -50,15 +87,20 @@ class SessionManager:
         raw.setdefault("updated_at", raw["created_at"])
         raw.setdefault("compressed_context", "")
         raw.setdefault("messages", [])
+        # 回写到 Redis 热层
+        self._redis_write(raw)
         return raw
 
     def _write_session(self, record: dict[str, Any]) -> None:
         session_id = str(record["id"])
         record["updated_at"] = time.time()
+        # 写磁盘（冷存储，永久保留）
         self._session_path(session_id).write_text(
             json.dumps(record, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # 写 Redis（热存储，7 天 TTL）
+        self._redis_write(record)
 
     def create_session(self, title: str = "新会话") -> dict[str, Any]:
         session_id = uuid.uuid4().hex
@@ -156,6 +198,7 @@ class SessionManager:
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()
+        redis_client.delete(self._redis_key(session_id))
 
     def compress_history(self, session_id: str, summary: str, n_messages: int) -> dict[str, int]:
         record = self._read_session_file(session_id)
