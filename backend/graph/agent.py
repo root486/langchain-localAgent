@@ -49,10 +49,12 @@ class AgentManager:
         self.session_manager: SessionManager | None = None
         self.tools = []
 
-    def initialize(self, base_dir: Path) -> None:
+    def initialize(self, base_dir: Path, mcp_tools: list | None = None) -> None:
         self.base_dir = base_dir
         self.session_manager = SessionManager(base_dir)
         self.tools = get_all_tools(base_dir)
+        if mcp_tools:
+            self.tools.extend(mcp_tools)
         knowledge_orchestrator.configure(base_dir, self._build_chat_model)#负责编排知识库检索流程
 
     def _build_chat_model(self):

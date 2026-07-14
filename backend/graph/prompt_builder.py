@@ -14,6 +14,8 @@ SYSTEM_COMPONENTS: tuple[tuple[str, str], ...] = (
 RUNTIME_OVERRIDE = """<!-- Runtime Override -->
 When explicit retrieval evidence is provided for the current request, prioritize that evidence.
 Do not assume missing evidence exists elsewhere.
+For web search or fetching current information, use the tavily_web_search tool directly.
+Do NOT write Python code or shell commands for web search.
 """
 
 #截断文本，防止文件太长
