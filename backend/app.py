@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -18,8 +17,6 @@ from graph.agent import agent_manager
 from graph.memory_store import memory_store
 from knowledge_retrieval import knowledge_indexer
 from tools.skills_scanner import refresh_snapshot
-
-logger = logging.getLogger(__name__)
 
 
 async def _load_server_tools(
@@ -102,13 +99,6 @@ async def lifespan(_: FastAPI):
     mcp_tools = await _init_mcp_tools(settings)
     agent_manager.initialize(settings.backend_dir, mcp_tools=mcp_tools)
     memory_store.configure(settings.backend_dir)
-    # 长期记忆遗忘规则：每次启动执行一次（归档长期未用记忆 + 超限淘汰），失败不影响启动
-    try:
-        forget_result = memory_store.run_forget_rules()
-        if forget_result.get("archived") or forget_result.get("pruned"):
-            logger.info("[memory_store] 遗忘规则执行: %s", forget_result)
-    except Exception:
-        logger.warning("[memory_store] 遗忘规则执行失败（不影响启动）", exc_info=True)
     knowledge_indexer.configure(settings.backend_dir)
     if not knowledge_indexer.status().ready:
         knowledge_indexer.rebuild_index()

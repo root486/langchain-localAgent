@@ -9,7 +9,7 @@ SYSTEM_COMPONENTS: tuple[tuple[str, str], ...] = (
     ("Soul", "workspace/SOUL.md"),#人格
     ("Identity", "workspace/IDENTITY.md"),#身份
 )
-# 长期记忆说明：MEMORY.md 静态注入已废弃，改为 PostgreSQL + ChromaDB 动态检索（见 graph/memory_store.py）
+# 长期记忆说明：MEMORY.md 静态注入已废弃，改为 PostgreSQL 简单长期记忆动态检索（见 graph/memory_store.py）
 LONG_TERM_MEMORY_NOTE = (
     "<!-- Long-term Memory -->\n"
     "相关长期记忆（用户画像 / 项目事实）将通过检索证据动态注入。"

@@ -105,7 +105,7 @@ async def _run_compression(session_id: str) -> None:
         pass
 
 
-# ---------- 长期记忆自动抽取（write_from_session 触发） ----------
+# ---------- 长期记忆自动抽取（remember 触发） ----------
 
 
 def _schedule_memory_extraction(session_id: str) -> None:
@@ -119,7 +119,7 @@ async def _extract_messages(messages: list[dict]) -> None:
     """把一批消息交给长期记忆抽取器（内部自动整合 ADD/UPDATE/DELETE）。失败仅打日志。"""
     try:
         if memory_store.is_ready():
-            await memory_store.write_from_session(messages)
+            await memory_store.remember(messages)
     except Exception:
         logger.warning("[chat] 记忆抽取失败（不影响响应）", exc_info=True)
 

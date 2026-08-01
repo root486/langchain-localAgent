@@ -225,7 +225,7 @@ class AgentManager:
             raise RuntimeError("AgentManager is not initialized")
 
         augmented_history = list(history)
-        # 长期记忆：PG 结构化事实 + ChromaDB 召回。记忆常开（MEMORY.md 静态注入已废弃）
+        # 长期记忆：PG 单表 + 应用侧余弦召回。记忆常开（MEMORY.md 静态注入已废弃）
         if memory_store.is_ready():
             retrievals = memory_store.retrieve(message, top_k=3)
             if retrievals:

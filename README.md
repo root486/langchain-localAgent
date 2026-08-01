@@ -3,7 +3,7 @@
 基于 LangChain ReAct Agent + RAG 的电商知识库智能检索工作台。Agent 自主编排检索策略，通过 Multi-Query 扩展、混合检索、交叉编码精排三级 pipeline 从电商知识库提取证据，结合 MCP 协议集成外部工具链，全链路 SSE 流式可观测。
 
 - 对话、工具调用、检索过程全部可审计
-- 长期记忆使用 PostgreSQL 结构化事实 + ChromaDB 向量检索
+- 长期记忆使用 PostgreSQL 单表（text + float8[] 向量）+ 应用侧余弦召回
 - 技能不是黑盒函数，而是可读可改的 `SKILL.md`
 - 前端直接展示流式回复、ThoughtChain 推理链和检索证据
 
@@ -26,7 +26,7 @@
 - FastAPI + SSE 流式聊天
 - ReAct Agent 工具编排（终端执行、Python REPL、文件读写、URL 抓取、MCP 外部工具）
 - 会话持久化（Redis 热层 + JSON 文件冷层，7 天 TTL）
-- 长期记忆检索（PG `memories` 事实表 + ChromaDB `memory_facts` 向量召回）
+- 长期记忆检索（PG `memories` 单表 + 应用侧余弦召回）
 - 知识库路由判断（显式关键词直通 + LLM 二分类）
 - 本地知识库检索（Multi-Query → Vector + BM25 → RRF → Rerank）
 - 前端工作台 + ThoughtChain 推理可视化
@@ -64,7 +64,6 @@ flowchart LR
 │  ├─ graph/                  # Agent、prompt、session、memory 相关逻辑
 │  ├─ knowledge/              # 仓库内置示例知识库
 │  ├─ knowledge_retrieval/    # 检索链路：Multi-Query → Hybrid → RRF → Rerank
-│  ├─ memory/                 # （DEPRECATED）旧 MEMORY.md，长期记忆已迁至 PG + ChromaDB
 │  ├─ scripts/                # 评测脚本（BM25 离线 + RAGAS 在线）
 │  ├─ sessions/               # 会话历史（JSON + Redis）
 │  ├─ skills/                 # 技能目录（SKILL.md 定义）

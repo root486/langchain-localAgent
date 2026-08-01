@@ -5,7 +5,6 @@
 | `chunk_size=1200` | `indexer.py` `_split_markdown` | Markdown 段落最大字符数 |
 | `top_k=3` | `graph/memory_store.py` | 长期记忆默认检索数量（agent.py 调用） |
 | `MIN_SCORE=0.4` | `graph/memory_store.py` | 长期记忆相似度阈值，低于则不注入上下文（相关性门槛） |
-| `RETRIEVE_POOL_MULTIPLIER=3` | `graph/memory_store.py` | 向量召回放大倍数（先多召回，过滤阈值后再取 top_k） |
 | `top_k=4` | `hybrid_retriever.py` | 向量/BM25 默认检索数量 |
 | `top_k=4` | `orchestrator.py`（rerank `top_n`）/ `fusion.py`（默认值） | RRF 精排后最终返回数量（宽池 20 → 精排 4，RAGAS 对比后采用 4） |
 | `top_k=20` | `orchestrator.py` / `scripts/evaluate_ragas.py` | RRF 融合宽池（rerank 候选池），精排前保留的候选数量 |
@@ -26,10 +25,10 @@
 | `AUTO_COMPRESS_TOKEN_LIMIT=12000` | `config.py` | 会话历史（含摘要链）token 预算，超过触发压缩（软触发） |
 | `SUMMARY_CHAIN_TOKEN_LIMIT=3000` | `config.py` | 压缩摘要链 token 上限，超过二次折叠为单条 |
 | `SESSION_REDIS_TTL=86400*7` | `session_manager.py` | Redis 会话过期时间（7 天） |
-| `ARCHIVE_AFTER_DAYS=180` | `graph/memory_store.py` | 遗忘：active 记忆超过该天数未使用 → archived（从未使用的按 created_at 计满该天数才归档） |
-| `MAX_MEMORIES=5000` | `graph/memory_store.py` | 遗忘：记忆行数上限，超限优先淘汰 archived 中 created_at 最早的 |
+| `DEDUP_THRESHOLD=0.93` | `graph/memory_store.py` | 写入去重余弦阈值：与已有记忆相似度超过则视为重复跳过 |
+| `MAX_MEMORIES=2000` | `graph/memory_store.py` | 记忆行数上限，超限删 created_at 最早的（锁死全表扫描边界） |
+| `RETRIEVE_POOL=3000` | `graph/memory_store.py` | retrieve 全表 SELECT 上限（防御性，MAX_MEMORIES 下永不触达） |
 | `EXTRACT_MESSAGES_MAX=20` | `graph/memory_store.py` | 抽取器：单次输入的最大消息条数 |
-| `SIMILAR_TOP_K=3` | `graph/memory_store.py` | 整合决策器：每条新记忆检索的相近已有记忆条数 |
 | `MEMORY_EXTRACT_MIN_MESSAGES=6` | `api/chat.py` | 记忆抽取触发阈值：距上次抽取的新消息 ≥6 条才后台抽取一次 |
 | `memory_extracted_until` | `graph/session_manager.py` | 会话记录加性字段：记忆抽取游标（已抽取的消息条数），前端不读 |
 | `RAG_CACHE_THRESHOLD=0.92` | `config.py` | 语义缓存命中余弦阈值（RAG 场景建议 0.90-0.95，调低会答非所问） |

@@ -10,6 +10,7 @@ langsmith>=0.8.0,<1.0.0
 langchain-openai>=1.0.0,<2.0.0
 langchain-deepseek>=1.0.0,<2.0.0
 chromadb>=1.0.0,<2.0.0
+numpy>=1.24,<3.0
 jieba>=0.42.1,<0.43.0
 rank-bm25>=0.2.2,<0.3.0
 redis>=5.0.0,<6.0.0

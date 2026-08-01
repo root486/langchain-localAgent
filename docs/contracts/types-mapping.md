@@ -19,9 +19,9 @@
 - 后端加新值 → 前端 `api.ts` 的 `Evidence.channel` 类型必须同步更新
 - 前端 `RetrievalCard.tsx` 的 `STEP_META` 必须加对应样式配置，否则 fallback 到默认样式
 
-**memory 证据来源**（长期记忆已改为 PG + ChromaDB，见 `graph/memory_store.py`）：
-- `source_path` = `memory:<scope>/<category>`（如 `memory:user/preference`）
-- `locator` = `memory`（恒值）；每条结果附带 `memory_id`（对应 PG `memories.id`）
+**memory 证据来源**（长期记忆为 PG `memories` 表 + 应用侧余弦召回，见 `graph/memory_store.py`）：
+- `source_path` = `memory`（恒值，不再区分 scope/category）
+- `locator` = `memory`（恒值）
 
 **RetrievalKind**：
 ```

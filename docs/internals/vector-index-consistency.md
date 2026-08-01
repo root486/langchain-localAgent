@@ -4,7 +4,7 @@
 
 | 操作 | 需要重建什么 | 原因 |
 |------|-------------|------|
-| 修改 `EMBEDDING_MODEL` 或 `EMBEDDING_PROVIDER` | **删除** `storage/knowledge/vector/chroma/` + `storage/memory_facts/chroma/` **再** rebuild | 新模型的向量维度可能不同，旧索引的向量与新模型不兼容 |
+| 修改 `EMBEDDING_MODEL` 或 `EMBEDDING_PROVIDER` | **删除** `storage/knowledge/vector/chroma/` + **清空 PG `memories` 表** **再** rebuild | 新模型的向量维度可能不同，旧索引/旧向量的维度与新模型不兼容 |
 | 修改 `_split_markdown` / `_split_json` 逻辑 | rebuild knowledge 索引 | chunk 内容/结构变化，旧索引与新 manifest 不一致 |
 | 修改 `_tokenize` 逻辑 | rebuild knowledge 索引 | BM25 tokens 会变，旧 tokens 与新分词器不匹配 |
 | 增删 `knowledge/` 下的文件 | rebuild knowledge 索引 | 当前没有自动检测文件变更的机制 |
@@ -32,7 +32,7 @@ _build_documents() → _write_manifest() → _build_bm25_index() → _build_vect
 
 - [ ] 确认新模型的向量维度与旧模型相同（否则必须全量重建）
 - [ ] 删除 `backend/storage/knowledge/vector/chroma/` 目录
-- [ ] 删除 `backend/storage/memory_facts/chroma/` 目录
+- [ ] 清空 PG `memories` 表（长期记忆向量，维度会变）
 - [ ] 更新 `.env` 中的 `EMBEDDING_MODEL` / `EMBEDDING_PROVIDER` / `EMBEDDING_API_KEY`
 - [ ] 重启后端进程
 - [ ] 验证：`GET /api/knowledge/index/status` 返回 `vector_ready: true`

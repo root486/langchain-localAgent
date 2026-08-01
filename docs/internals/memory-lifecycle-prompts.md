@@ -1,16 +1,12 @@
-# 长期记忆生命周期：抽取器 / 整合决策器 / 遗忘策略 提示词
+# 长期记忆生命周期：抽取器 / 整合决策器 / 遗忘策略 提示词（DEPRECATED）
 
-> 用途：给 `graph/memory_store.py` 补上「自动写入 + 整合 + 遗忘」。
-> 存储层（PG `memories` 表 + ChromaDB `memory_facts`）与读取路径已就绪，本文件只含 LLM 提示词与集成点。
-> 关联：CLAUDE.md §4.7、docs/internals/init-order.md、docs/reference/hardcoded-values.md。
-
-> ✅ **已实施（2026-08-01）**：抽取器 / 整合决策器提示词已实现为
-> `graph/memory_store.py` 的 `EXTRACTOR_SYSTEM_PROMPT` / `CONSOLIDATOR_SYSTEM_PROMPT`，
-> 调用入口 `MemoryStore.write_from_session()`，触发在 `api/chat.py`（`_schedule_memory_extraction`，
-> 会话空闲时游标增量抽取 + 压缩时对被归档消息抽取），遗忘规则 `MemoryStore.run_forget_rules()` 在 `app.py`
-> lifespan 启动时执行。实现注意：
-> - 遗忘规则中「`last_used_at` 为空」按 `created_at` 计满 `ARCHIVE_AFTER_DAYS` 才归档，避免刚写入的新记忆被立即归档；
-> - 抽取 / 整合 LLM 用 `config.summary_model`（SUMMARY_MODEL，如 deepseek-v4-flash），未配置时回退主模型。
+> ⚠️ **已废弃（2026-08-01）**：长期记忆已重构为简单 PG 单表方案（见 `graph/memory_store.py`），
+> 整合决策器 / 遗忘规则 / scope-category-status 枚举全部删除。
+> 现保留的只有「抽取器」概念：一次 LLM 调用从对话提取纯 text 事实数组
+> （`EXTRACTOR_SYSTEM_PROMPT`，输出 `{"memories": ["..."]}`），写入入口 `MemoryStore.remember()`，
+> 触发在 `api/chat.py`（`_schedule_memory_extraction`，游标增量抽取）。
+> 去重由嵌入余弦 `DEDUP_THRESHOLD=0.93` 完成，不再走 LLM 决策器；遗忘由 `_prune` 行数上限（2000）承担。
+> 本文档保留仅供历史查阅。
 
 ---
 
