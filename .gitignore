@@ -18,6 +18,7 @@ backend/storage/memory_facts/*
 frontend/.next/
 frontend/node_modules/
 frontend/.npm-cache/
+*.tsbuildinfo
 .vscode/
 .idea/
 .claude/
