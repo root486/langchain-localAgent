@@ -35,7 +35,6 @@
 | `app.py` | FastAPI 入口：lifespan 初始化顺序、路由注册、MCP 工具加载（Tavily stdio + 高德 streamable http，带超时重试，见 `_init_mcp_tools` / `_load_server_tools`） | 所有单例、langchain_mcp_adapters |
 | `api/chat.py` | `POST /api/chat` SSE 流、自动压缩触发（固定历史 token 预算 + 80% 硬兜底，后台化） | agent_manager、prompt_builder、config |
 | `api/sessions.py` | 会话 CRUD + `generate-title` | session_manager |
-| `api/files.py` | 读写白名单文件；**保存后副作用**（skills→snapshot） | agent_manager、skills_scanner |
 | `api/tokens.py` | token 统计 | prompt_builder、session_manager |
 | `api/knowledge_index.py` | 索引 status + rebuild | knowledge_indexer |
 | `graph/agent.py` | **核心**：AgentManager.astream()，三条路径分支，SSE 事件生产 | memory_store、knowledge_orchestrator、session_manager、prompt_builder、tools |
@@ -61,10 +60,10 @@
 | 路径 | 性质 | 说明 |
 |------|------|------|
 | `backend/knowledge/` | 📄 源文件 | 知识库原始文件（md/json），**不可恢复，改后需手动重建索引** |
-| `backend/memory/MEMORY.md` | 📄 ~~源文件~~ | **DEPRECATED**：长期记忆改为 PG `memories` 表 + ChromaDB `memory_facts`（见 graph/memory_store.py）；文件保留仅供查阅，已移出编辑白名单 |
+| `backend/memory/MEMORY.md` | 📄 ~~源文件~~ | **DEPRECATED**：长期记忆改为 PG `memories` 表 + ChromaDB `memory_facts`（见 graph/memory_store.py）；文件保留仅供查阅，不再有编辑入口（见 4.5） |
 | `backend/workspace/` | 📄 源文件 | 人格/身份（SOUL.md / IDENTITY.md），改后下次请求自动生效 |
-| `backend/skills/*/SKILL.md` | 📄 源文件 | Skill 定义，增删改会自动重建 SKILLS_SNAPSHOT.md |
-| `backend/SKILLS_SNAPSHOT.md` | 🔧 生成 | 启动 + 保存 skills 文件时自动重建 |
+| `backend/skills/*/SKILL.md` | 📄 源文件 | Skill 定义，改后需重启进程重建 SKILLS_SNAPSHOT.md |
+| `backend/SKILLS_SNAPSHOT.md` | 🔧 生成 | 启动时自动重建（`app.py` lifespan 调 `refresh_snapshot`） |
 | `backend/storage/knowledge/manifest.json` | 🔧 生成 | chunk 数据 + BM25 tokens |
 | `backend/storage/knowledge/vector/chroma/` | 🔧 生成 | ChromaDB 向量索引（chroma.sqlite3） |
 | `backend/storage/memory_facts/` | 🔧 生成 | 长期记忆向量索引（ChromaDB `memory_facts/chroma/`，collection `memory_facts`） |
@@ -78,11 +77,10 @@
 | 路径 | 职责 |
 |------|------|
 | `src/lib/api.ts` | **类型定义 + API 客户端**：Evidence / RetrievalStep / KnowledgeIndexStatus / SessionHistory，与后端 `types.py` 一一对应 |
-| `src/lib/store.tsx` | 全局状态 + **SSE onEvent 处理**：token / tool_start / tool_end / retrieval / new_response / done / title / error；`FIXED_FILES` 可编辑文件列表 |
+| `src/lib/store.tsx` | 全局状态 + **SSE onEvent 处理**：token / tool_start / tool_end / retrieval / new_response / done / title / error |
 | `src/components/chat/RetrievalCard.tsx` | 检索轨迹卡片，**STEP_META 按 stage 映射样式** |
 | `src/components/chat/ThoughtChain.tsx` | 工具调用链展示（tool_start/tool_end 配对） |
 | `src/components/chat/ChatMessage.tsx` / `ChatPanel.tsx` / `ChatInput.tsx` | 消息渲染 / 面板 / 输入 |
-| `src/components/editor/InspectorPanel.tsx` | 右侧可编辑文件面板 |
 | `src/components/layout/` | Sidebar / Navbar / ResizeHandle 布局 |
 
 ### 2.4 docs/
@@ -196,18 +194,16 @@ POST /api/chat (SSE)
 | 新增配置项 | 同步改 `config.py` 的 `Settings` 解析 + `.env.example` + 读取该配置的模块 |
 | 新增 provider | 同步改 `config.py` 的 `LLM_PROVIDER_DEFAULTS` / `EMBEDDING_PROVIDER_DEFAULTS` / `PROVIDER_ALIASES` + 各 `_resolve_*` 函数 |
 
-### 4.5 文件白名单 / 可编辑文件
+### 4.5 可编辑文件 API（已删除）
 
-| 改动 | 必须同步的地方 |
-|------|--------------|
-| 新增可编辑文件类别 | **后端 `api/files.py` 的 `ALLOWED_PREFIXES` / `ALLOWED_ROOT_FILES` + 前端 `store.tsx` 的 `FIXED_FILES`**（两端白名单要一致） |
-| 改 `api/files.py` 保存副作用 | 保存 `skills/*` → `refresh_snapshot()`；`knowledge/*` / `workspace/*` 无副作用。**`memory/` 已移出白名单**（长期记忆不再作为文件编辑） |
+> 前端 Inspector 面板（Memory / Skills / Prompt）与后端 `api/files.py`（`GET/POST /api/files`、`GET /api/skills`）已删除，前端不再在线编辑 `SOUL.md` / `IDENTITY.md` / `SKILLS_SNAPSHOT.md` / `skills/*`。
+> 这些文件仍是系统提示词的输入（见 4.7 `prompt_builder`）；`SKILLS_SNAPSHOT.md` 由 `tools/skills_scanner.refresh_snapshot()` 在**启动时**重建（app.py lifespan）。改文件直接改磁盘，`workspace/` 下次请求生效，`knowledge/` 需手动 rebuild（见 4.3），`skills/` 需重启进程。
 
 ### 4.6 新增 Skill / 工具
 
 | 改动 | 必须做的事 |
 |------|-----------|
-| 新增 `skills/*/SKILL.md` | 启动或保存后自动扫描进 `SKILLS_SNAPSHOT.md`；**前端 InspectorPanel 可编辑列表来自 `GET /api/skills`，无需手改**（但新增非 skills 白名单文件仍需按 4.5） |
+| 新增 `skills/*/SKILL.md` | 启动时自动扫描进 `SKILLS_SNAPSHOT.md`（在线编辑入口已随 4.5 删除，改 skill 需直接改文件 + 重启） |
 | 新增 Agent 工具 | 注册到 `tools/__init__.py::get_all_tools()`（只有普通对话路径的 agent 拿到） |
 
 ### 4.7 其他模块依赖（改前确认）

@@ -1,6 +1,6 @@
-# Agent-RAG 智能知识库检索系统
+# 基于 Agent + RAG 的电商知识库检索系统
 
-基于 LangChain ReAct Agent + RAG 的本地知识库智能检索工作台。Agent 自主编排检索策略，通过 Multi-Query 扩展、混合检索、交叉编码精排三级 pipeline 从本地知识库提取证据，结合 MCP 协议集成外部工具链，全链路 SSE 流式可观测。
+基于 LangChain ReAct Agent + RAG 的电商知识库智能检索工作台。Agent 自主编排检索策略，通过 Multi-Query 扩展、混合检索、交叉编码精排三级 pipeline 从电商知识库提取证据，结合 MCP 协议集成外部工具链，全链路 SSE 流式可观测。
 
 - 对话、工具调用、检索过程全部可审计
 - 长期记忆使用 PostgreSQL 结构化事实 + ChromaDB 向量检索
@@ -29,8 +29,7 @@
 - 长期记忆检索（PG `memories` 事实表 + ChromaDB `memory_facts` 向量召回）
 - 知识库路由判断（显式关键词直通 + LLM 二分类）
 - 本地知识库检索（Multi-Query → Vector + BM25 → RRF → Rerank）
-- 前端三栏工作台 + ThoughtChain 推理可视化
-- 在线编辑 Skills / Workspace 文件
+- 前端工作台 + ThoughtChain 推理可视化
 
 当前内置技能：
 
@@ -60,7 +59,7 @@ flowchart LR
 
 ```text
 ├─ backend/
-│  ├─ api/                    # Chat、session、file、token、knowledge index 接口
+│  ├─ api/                    # Chat、session、token、knowledge index 接口
 │  ├─ cache/                  # Redis 客户端 + RAG 证据语义缓存
 │  ├─ graph/                  # Agent、prompt、session、memory 相关逻辑
 │  ├─ knowledge/              # 仓库内置示例知识库

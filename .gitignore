@@ -22,7 +22,6 @@ frontend/.npm-cache/
 .idea/
 .claude/
 *.log
-AGENTS.md
 1.py
 backend/temp_*.txt
 temp_*.py

@@ -1,14 +1,13 @@
 "use client";
 
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { InspectorPanel } from "@/components/editor/InspectorPanel";
 import { Navbar } from "@/components/layout/Navbar";
 import { ResizeHandle } from "@/components/layout/ResizeHandle";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { AppProvider, useAppStore } from "@/lib/store";
 
 function Workspace() {
-  const { sidebarWidth, inspectorWidth, setSidebarWidth, setInspectorWidth } = useAppStore();
+  const { sidebarWidth, setSidebarWidth } = useAppStore();
 
   return (
     <main className="min-h-screen p-4 md:p-6">
@@ -20,12 +19,6 @@ function Workspace() {
           </div>
           <ResizeHandle onResize={(delta) => setSidebarWidth(Math.max(260, sidebarWidth + delta))} />
           <ChatPanel />
-          <ResizeHandle
-            onResize={(delta) => setInspectorWidth(Math.max(320, inspectorWidth - delta))}
-          />
-          <div style={{ width: inspectorWidth }}>
-            <InspectorPanel />
-          </div>
         </div>
       </div>
     </main>

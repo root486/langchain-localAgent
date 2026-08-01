@@ -1,18 +1,13 @@
 # 存储目录与隐式副作用
 
-## 文件保存 API 的隐式触发规则
+## 可编辑文件 API（已移除）
 
-`POST /api/files` 保存文件后的副作用：
+> 前端 Inspector 面板与后端 `api/files.py`（`GET/POST /api/files`、`GET /api/skills`）已删除，不再有"保存文件"入口。
 
-| 保存路径 | 触发的副作用 | 是否阻塞 |
-|----------|-------------|---------|
-| `skills/` 下的任何文件 | `refresh_snapshot()` → 重写 `SKILLS_SNAPSHOT.md` | 是 |
-| `knowledge/` 下的任何文件 | **无** — 必须手动点"重建索引" | — |
-| `workspace/` 下的文件 | **无** — 下次请求自动读取最新内容 | — |
-
-**规则**：
-- 如果要给 `knowledge/` 文件保存加自动 rebuild，需要异步执行（知识库可能很大），同时更新前端 UX 提示
-- `memory/` 已移出编辑白名单（长期记忆改为 PG `memories` 表 + ChromaDB `memory_facts`，见 `graph/memory_store.py`），不再作为文件保存
+- `SKILLS_SNAPSHOT.md` 现仅在**启动时**由 `tools/skills_scanner.refresh_snapshot()` 重建（app.py lifespan）；改 `skills/*/SKILL.md` 后需重启进程生效
+- `workspace/`（SOUL.md / IDENTITY.md）：直接改文件，下次请求自动读取最新内容
+- `knowledge/`：直接改文件后需手动 `POST /api/knowledge/index/rebuild`（无自动检测，见 `docs/internals/vector-index-consistency.md`）
+- `memory/` 不是文件（长期记忆为 PG `memories` 表 + ChromaDB `memory_facts`，见 `graph/memory_store.py`）
 
 ## 配置变更影响表
 

@@ -129,23 +129,6 @@ export async function getSessionTokens(sessionId: string) {
   }>(`/tokens/session/${sessionId}`);
 }
 
-export async function listSkills() {
-  return request<Array<{ name: string; description: string; path: string }>>("/skills");
-}
-
-export async function loadFile(path: string) {
-  return request<{ path: string; content: string }>(
-    `/files?path=${encodeURIComponent(path)}`
-  );
-}
-
-export async function saveFile(path: string, content: string) {
-  return request<{ ok: boolean; path: string }>("/files", {
-    method: "POST",
-    body: JSON.stringify({ path, content })
-  });
-}
-
 export async function getKnowledgeIndexStatus() {
   return request<KnowledgeIndexStatus>("/knowledge/index/status");
 }

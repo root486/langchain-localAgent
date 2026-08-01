@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import {
   createSession,
@@ -9,11 +9,8 @@ import {
   getSessionHistory,
   getSessionTokens,
   listSessions,
-  listSkills,
-  loadFile,
   renameSession,
   rebuildKnowledgeIndex as rebuildKnowledgeIndexRequest,
-  saveFile,
   streamChat,
   type Evidence,
   type KnowledgeIndexStatus,
@@ -41,13 +38,7 @@ type AppStore = {
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
-  skills: Array<{ name: string; description: string; path: string }>;
-  editableFiles: string[];
-  inspectorPath: string;
-  inspectorContent: string;
-  inspectorDirty: boolean;
   sidebarWidth: number;
-  inspectorWidth: number;
   tokenStats: TokenStats | null;
   knowledgeIndexStatus: KnowledgeIndexStatus | null;
   createNewSession: () => Promise<void>;
@@ -55,19 +46,9 @@ type AppStore = {
   sendMessage: (value: string) => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
-  loadInspectorFile: (path: string) => Promise<void>;
-  updateInspectorContent: (value: string) => void;
-  saveInspector: () => Promise<void>;
   rebuildKnowledgeIndex: () => Promise<void>;
   setSidebarWidth: (width: number) => void;
-  setInspectorWidth: (width: number) => void;
 };
-
-const FIXED_FILES = [
-  "workspace/SOUL.md",
-  "workspace/IDENTITY.md",
-  "SKILLS_SNAPSHOT.md"
-];
 
 const StoreContext = createContext<AppStore | null>(null);
 
@@ -137,28 +118,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [skills, setSkills] = useState<Array<{ name: string; description: string; path: string }>>([]);
-  const [inspectorPath, setInspectorPath] = useState("workspace/SOUL.md");
-  const [inspectorContent, setInspectorContent] = useState("");
-  const [inspectorDirty, setInspectorDirty] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(308);
-  const [inspectorWidth, setInspectorWidth] = useState(360);
   const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
   const [knowledgeIndexStatus, setKnowledgeIndexStatus] = useState<KnowledgeIndexStatus | null>(
     null
   );
 
-  const editableFiles = useMemo(
-    () => [...FIXED_FILES, ...skills.map((skill) => skill.path)],
-    [skills]
-  );
-
   async function refreshSessions() {
     setSessions(await listSessions());
-  }
-
-  async function refreshSkills() {
-    setSkills(await listSkills());
   }
 
   async function refreshKnowledgeIndexStatus() {
@@ -355,24 +322,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function loadInspectorFile(path: string) {
-    setInspectorPath(path);
-    const file = await loadFile(path);
-    setInspectorContent(file.content);
-    setInspectorDirty(false);
-  }
-
-  function updateInspectorContent(value: string) {
-    setInspectorContent(value);
-    setInspectorDirty(true);
-  }
-
-  async function saveInspector() {
-    await saveFile(inspectorPath, inspectorContent);
-    setInspectorDirty(false);
-    await refreshSkills();
-  }
-
   async function rebuildKnowledgeIndex() {
     await rebuildKnowledgeIndexRequest();
     await refreshKnowledgeIndexStatus();
@@ -380,14 +329,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void (async () => {
-      const [initialSessions, initialSkills, initialKnowledgeIndexStatus] = await Promise.all([
+      const [initialSessions, initialKnowledgeIndexStatus] = await Promise.all([
         listSessions(),
-        listSkills(),
         getKnowledgeIndexStatus()
       ]);
 
       setSessions(initialSessions);
-      setSkills(initialSkills);
       setKnowledgeIndexStatus(initialKnowledgeIndexStatus);
 
       if (initialSessions.length) {
@@ -398,10 +345,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setCurrentSessionId(created.id);
         setSessions([created]);
       }
-
-      const file = await loadFile("workspace/SOUL.md");
-      setInspectorPath(file.path);
-      setInspectorContent(file.content);
     })();
   }, []);
 
@@ -422,13 +365,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     currentSessionId,
     messages,
     isStreaming,
-    skills,
-    editableFiles,
-    inspectorPath,
-    inspectorContent,
-    inspectorDirty,
     sidebarWidth,
-    inspectorWidth,
     tokenStats,
     knowledgeIndexStatus,
     createNewSession,
@@ -436,12 +373,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     sendMessage,
     renameCurrentSession,
     removeSession,
-    loadInspectorFile,
-    updateInspectorContent,
-    saveInspector,
     rebuildKnowledgeIndex,
-    setSidebarWidth,
-    setInspectorWidth
+    setSidebarWidth
   };
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
