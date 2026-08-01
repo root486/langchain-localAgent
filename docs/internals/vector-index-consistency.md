@@ -4,18 +4,17 @@
 
 | 操作 | 需要重建什么 | 原因 |
 |------|-------------|------|
-| 修改 `EMBEDDING_MODEL` 或 `EMBEDDING_PROVIDER` | **删除** `storage/knowledge/vector/` + `storage/memory_index/` **再** rebuild | 新模型的向量维度可能不同，旧索引的向量与新模型不兼容 |
+| 修改 `EMBEDDING_MODEL` 或 `EMBEDDING_PROVIDER` | **删除** `storage/knowledge/vector/chroma/` + `storage/memory_facts/chroma/` **再** rebuild | 新模型的向量维度可能不同，旧索引的向量与新模型不兼容 |
 | 修改 `_split_markdown` / `_split_json` 逻辑 | rebuild knowledge 索引 | chunk 内容/结构变化，旧索引与新 manifest 不一致 |
 | 修改 `_tokenize` 逻辑 | rebuild knowledge 索引 | BM25 tokens 会变，旧 tokens 与新分词器不匹配 |
 | 增删 `knowledge/` 下的文件 | rebuild knowledge 索引 | 当前没有自动检测文件变更的机制 |
-| 修改 `MEMORY.md` | **自动 rebuild**（通过 MD5 检测） | MemoryIndexer._maybe_rebuild() |
 | 修改 BM25 参数 (k1, b) | rebuild knowledge 索引 | BM25 评分使用硬编码参数 |
 
 ## manifest 与 vector 索引不同步的恢复策略
 
 当前 `rebuild_index()` 的执行顺序：
 ```
-_build_documents() → _write_manifest() → _prepare_bm25_stats() → _build_vector_index()
+_build_documents() → _write_manifest() → _build_bm25_index() → _build_vector_index()
 ```
 
 **风险**：如果在 `_write_manifest()` 之后、`_build_vector_index()` 之前崩溃：
@@ -32,9 +31,8 @@ _build_documents() → _write_manifest() → _prepare_bm25_stats() → _build_ve
 ## Embedding 模型变更检查清单
 
 - [ ] 确认新模型的向量维度与旧模型相同（否则必须全量重建）
-- [ ] 删除 `backend/storage/knowledge/vector/` 目录
-- [ ] 删除 `backend/storage/memory_index/` 目录（除 `.gitkeep`）
-- [ ] 删除 `backend/storage/memory_index/meta.json`
+- [ ] 删除 `backend/storage/knowledge/vector/chroma/` 目录
+- [ ] 删除 `backend/storage/memory_facts/chroma/` 目录
 - [ ] 更新 `.env` 中的 `EMBEDDING_MODEL` / `EMBEDDING_PROVIDER` / `EMBEDDING_API_KEY`
 - [ ] 重启后端进程
 - [ ] 验证：`GET /api/knowledge/index/status` 返回 `vector_ready: true`

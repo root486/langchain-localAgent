@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
 import os
-import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -70,13 +67,27 @@ class Settings:
     embedding_model: str
     embedding_api_key: str | None
     embedding_base_url: str
+    pg_dsn: str = ""  # PostgreSQL 长期记忆事实源（本机 D:\PostgreSQL，库 raglongmem）
     redis_url: str = ""
+    rag_cache_enabled: bool = True  # 检索证据语义缓存开关（RAG_CACHE_ENABLED）
+    rag_cache_ttl: int = 86_400  # 缓存有效期（秒），默认 24h（RAG_CACHE_TTL）
+    rag_cache_threshold: float = 0.92  # 语义命中余弦阈值（RAG_CACHE_THRESHOLD，建议 0.90-0.95）
+    rag_cache_max_entries: int = 500  # 内存语义索引最大条目数（RAG_CACHE_MAX_ENTRIES）
     summary_model: str = ""
     summary_api_key: str = ""
     summary_base_url: str = "https://api.deepseek.com"
+    rag_router_enabled: bool = True  # 知识库路由 LLM 判断开关（RAG_ROUTER_ENABLED）
+    router_model: str = ""  # 路由判断专用模型（RAG_ROUTER_MODEL，默认 deepseek-v4-flash）
+    router_api_key: str = ""  # 路由模型 API Key（RAG_ROUTER_API_KEY，空则回退 SUMMARY → 主模型）
+    router_base_url: str = ""  # 路由模型 Base URL（RAG_ROUTER_BASE_URL）
     max_context_tokens: int = 32_000
     component_char_limit: int = 20_000
+    auto_compress_token_limit: int = 12_000
+    summary_chain_token_limit: int = 3_000
     terminal_timeout_seconds: int = 30
+    langsmith_enabled: bool = False  # LangSmith 追踪开关（LANGSMITH_TRACING / LANGSMITH_TRACING_V2）
+    langsmith_api_key: str = ""  # LangSmith API Key（LANGSMITH_API_KEY，空则强制关闭追踪）
+    langsmith_project: str = "rag-project"  # LangSmith 项目名（LANGSMITH_PROJECT）
 
 
 def _load_env_file() -> Path:
@@ -238,44 +249,30 @@ def get_settings() -> Settings:
         embedding_model=_resolve_embedding_model(embedding_provider),
         embedding_api_key=_resolve_embedding_api_key(embedding_provider),
         embedding_base_url=_resolve_embedding_base_url(embedding_provider),
+        pg_dsn=_first_config_value("PG_DSN", "DATABASE_URL") or "",
         redis_url=_first_config_value("REDIS_URL") or "",
+        rag_cache_enabled=(_first_config_value("RAG_CACHE_ENABLED") or "true").lower()
+        in {"1", "true", "yes", "on"},
+        rag_cache_ttl=int(_first_config_value("RAG_CACHE_TTL") or "86400"),
+        rag_cache_threshold=float(_first_config_value("RAG_CACHE_THRESHOLD") or "0.92"),
+        rag_cache_max_entries=int(_first_config_value("RAG_CACHE_MAX_ENTRIES") or "500"),
         summary_model=_first_config_value("SUMMARY_MODEL") or "deepseek-v4-flash",
         summary_api_key=_first_config_value("SUMMARY_API_KEY") or "",
         summary_base_url=_first_config_value("SUMMARY_BASE_URL") or "https://api.deepseek.com",
+        rag_router_enabled=(_first_config_value("RAG_ROUTER_ENABLED") or "true").lower()
+        in {"1", "true", "yes", "on"},
+        router_model=_first_config_value("RAG_ROUTER_MODEL") or "deepseek-v4-flash",
+        router_api_key=_first_config_value("RAG_ROUTER_API_KEY") or "",
+        router_base_url=_first_config_value("RAG_ROUTER_BASE_URL") or "https://api.deepseek.com",
         max_context_tokens=int(_first_config_value("MAX_CONTEXT_TOKENS") or "128000"),
+        auto_compress_token_limit=int(
+            _first_config_value("AUTO_COMPRESS_TOKEN_LIMIT") or "12000"
+        ),
+        summary_chain_token_limit=int(
+            _first_config_value("SUMMARY_CHAIN_TOKEN_LIMIT") or "3000"
+        ),
+        langsmith_enabled=(_first_config_value("LANGSMITH_TRACING", "LANGSMITH_TRACING_V2") or "false").lower()
+        in {"1", "true", "yes", "on"},
+        langsmith_api_key=_first_config_value("LANGSMITH_API_KEY") or "",
+        langsmith_project=_first_config_value("LANGSMITH_PROJECT") or "rag-project",
     )
-
-
-class RuntimeConfigManager:
-    def __init__(self, config_path: Path) -> None:
-        self._config_path = config_path
-        self._lock = threading.Lock()
-        self._default_config = {"rag_mode": False}
-
-    def load(self) -> dict[str, Any]:
-        with self._lock:
-            if not self._config_path.exists():
-                self.save(self._default_config)
-            try:
-                return json.loads(self._config_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                self.save(self._default_config)
-                return dict(self._default_config)
-
-    def save(self, payload: dict[str, Any]) -> dict[str, Any]:
-        merged = dict(self._default_config)
-        merged.update(payload)
-        self._config_path.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return merged
-
-    def get_rag_mode(self) -> bool:
-        return bool(self.load().get("rag_mode", False))
-
-    def set_rag_mode(self, enabled: bool) -> dict[str, Any]:
-        return self.save({"rag_mode": enabled})
-
-
-runtime_config = RuntimeConfigManager(get_settings().backend_dir / "config.json")

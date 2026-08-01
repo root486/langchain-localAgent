@@ -12,18 +12,11 @@ KnowledgeIndexer:
   │   ⚠️ 如果磁盘上的 manifest.json 正在被写入，可能读到半写状态
   │
   └─ is_building() → 前端用于显示"重建中"状态
-
-MemoryIndexer:
-  rebuild_index() 无锁保护
-  │
-  └─ retrieve() → 开头调用 _maybe_rebuild()
-      如果 MEMORY.md 的 MD5 变了 → 同步 rebuild（阻塞当前请求）
 ```
 
 **规则**：
 - 不要在 `rebuild_index()` 执行期间修改 retrieve 逻辑（可能导致读到中间状态）
 - 不要删除 `_building` 标志的检查逻辑（前端依赖它轮询状态）
-- MemoryIndexer 的 rebuild 是同步阻塞的，大文件可能导致请求超时
 
 ## 前端 building 状态轮询的边界条件
 
@@ -50,5 +43,3 @@ useEffect(() => {
 |----------|------|---------|
 | 启动时 `app.py lifespan` | 主线程 | 阻塞启动，直到完成 |
 | `POST /api/knowledge/index/rebuild` | `asyncio.to_thread` 新线程 | 不阻塞 API 请求 |
-| 保存 `memory/MEMORY.md` | 请求处理线程 | **阻塞当前请求** |
-| MemoryIndexer._maybe_rebuild | 请求处理线程 | **阻塞当前请求** |

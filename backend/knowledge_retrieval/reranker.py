@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from langsmith import traceable
+
 from knowledge_retrieval.types import Evidence
 
 RERANK_MODEL = "qwen3-rerank"
@@ -14,6 +16,11 @@ RERANK_API_URL = (
 )
 
 
+@traceable(
+    run_type="chain",
+    name="rerank",
+    metadata={"model": RERANK_MODEL},
+)
 def rerank_evidences(
     query: str,
     evidences: list[Evidence],

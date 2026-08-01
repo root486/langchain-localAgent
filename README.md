@@ -3,7 +3,7 @@
 基于 LangChain ReAct Agent + RAG 的本地知识库智能检索工作台。Agent 自主编排检索策略，通过 Multi-Query 扩展、混合检索、交叉编码精排三级 pipeline 从本地知识库提取证据，结合 MCP 协议集成外部工具链，全链路 SSE 流式可观测。
 
 - 对话、工具调用、检索过程全部可审计
-- 长期记忆使用可直接编辑的 Markdown
+- 长期记忆使用 PostgreSQL 结构化事实 + ChromaDB 向量检索
 - 技能不是黑盒函数，而是可读可改的 `SKILL.md`
 - 前端直接展示流式回复、ThoughtChain 推理链和检索证据
 
@@ -14,11 +14,11 @@
 - **Agent 自主编排**：ReAct 推理-行动-观察循环，Agent 自主决策调用哪些工具、如何组合检索策略
 - **MCP 协议集成**：通过 MCP stdio transport 以子进程方式接入 Tavily 联网搜索等外部工具，进程隔离、故障降级，新增 MCP Server 只需加一段配置
 - **Multi-Query 查询扩展**：Router 自动判断查询类型（口语改写 / 子查询拆分），多路检索提升召回
-- **混合检索 + 精排**：Vector + BM25 双路召回 → RRF 融合（宽池 Top-20）→ qwen3-rerank 交叉编码器精排（Top-6）
+- **混合检索 + 精排**：Vector + BM25 双路召回 → RRF 融合（宽池 Top-20）→ qwen3-rerank 交叉编码器精排（Top-4）
 - **父子 Chunk + 上下文窗口**：句子边界切分，命中子 chunk 后向同 parent 兄弟扩展至 1500 字符，避免信息碎片化
 - **自适应上下文压缩**：对话 token 接近窗口上限时自动触发滑动窗口压缩，近期消息保留原文，早期消息由 DeepSeek V4 Flash 蒸馏为摘要注入
-- **Redis 可选**：会话热存储 + 用户偏好动态更新（不装也能正常跑，自动降级 JSON 文件）
-- **Prompt 可解释**：系统提示词由 SOUL / IDENTITY / MEMORY / SKILLS 多个文件实时组装
+- **Redis 可选**：会话热存储 + 检索证据语义缓存（不装也能正常跑，自动降级文件/内存）
+- **Prompt 可解释**：系统提示词由 SOUL / IDENTITY / SKILLS 实时组装，长期记忆通过检索动态注入
 - **技能可审计**：每个技能都是 `skills/*/SKILL.md`，Agent 按需读取执行
 
 ## 当前能力
@@ -26,16 +26,14 @@
 - FastAPI + SSE 流式聊天
 - ReAct Agent 工具编排（终端执行、Python REPL、文件读写、URL 抓取、MCP 外部工具）
 - 会话持久化（Redis 热层 + JSON 文件冷层，7 天 TTL）
-- 用户偏好动态更新（Redis Hash，Agent 对话中自动调整，替代静态 USER.md）
-- 长期记忆向量检索（`backend/memory/MEMORY.md`）
-- RAG 模式切换
-- 本地知识库检索（Skill Agent → Multi-Query → Vector + BM25 → RRF → Rerank）
+- 长期记忆检索（PG `memories` 事实表 + ChromaDB `memory_facts` 向量召回）
+- 知识库路由判断（显式关键词直通 + LLM 二分类）
+- 本地知识库检索（Multi-Query → Vector + BM25 → RRF → Rerank）
 - 前端三栏工作台 + ThoughtChain 推理可视化
-- 在线编辑 Memory / Skills / Workspace 文件
+- 在线编辑 Skills / Workspace 文件
 
 当前内置技能：
 
-- `rag-skill`：本地知识库检索
 - `web-search`：联网搜索（MCP Tavily）
 - `get_weather`：天气查询（MCP Tavily）
 - `retry-lesson-capture`：失败经验沉淀
@@ -45,33 +43,29 @@
 ```mermaid
 flowchart LR
     U["用户问题"] --> E["Multi-Query<br/>Router A/B"]
-    E --> S["Skill Retriever Agent"]
-    S --> V["向量检索"]
-    S --> B["BM25 检索"]
-    E --> V
-    E --> B
-    S --> F["RRF 融合<br/>宽池 Top-20"]
-    V --> F
+    E --> V["向量检索"]
+    E --> B["BM25 检索"]
+    V --> F["RRF 融合<br/>宽池 Top-20"]
     B --> F
-    F --> R["qwen3-rerank<br/>交叉编码器精排<br/>Top-6"]
+    F --> R["qwen3-rerank<br/>交叉编码器精排<br/>Top-4"]
     R --> G["LLM 生成回答"]
 ```
 
 - **Multi-Query**（始终执行）：A 路由（口语/模糊）→ 主改写 + 同义改写 2 条；B 路由（对比/多部分）→ 子查询 ≤3 条
 - **父子 Chunk**：句子边界切分，短 chunk（< 60 字符）自动合并，命中后上下文窗口扩展至 1500 字符
-- **RRF 融合**（k=60）：Skill 证据 + 多路 Vector + 多路 BM25 汇总，取宽池 Top-20
-- **qwen3-rerank 精排**：百炼交叉编码器对 Top-20 重排序，输出 Top-6，API 失败自动降级为原始排序
+- **RRF 融合**（k=60）：多路 Vector + 多路 BM25 汇总，取宽池 Top-20
+- **qwen3-rerank 精排**：百炼交叉编码器对 Top-20 重排序，输出 Top-4，API 失败自动降级为原始排序
 
 ## 系统结构
 
 ```text
 ├─ backend/
 │  ├─ api/                    # Chat、session、file、token、knowledge index 接口
-│  ├─ cache/                  # Redis 客户端 + 用户偏好
+│  ├─ cache/                  # Redis 客户端 + RAG 证据语义缓存
 │  ├─ graph/                  # Agent、prompt、session、memory 相关逻辑
 │  ├─ knowledge/              # 仓库内置示例知识库
-│  ├─ knowledge_retrieval/    # 检索链路：Skill → Multi-Query → Hybrid → RRF → Rerank
-│  ├─ memory/                 # 长期记忆文件 MEMORY.md
+│  ├─ knowledge_retrieval/    # 检索链路：Multi-Query → Hybrid → RRF → Rerank
+│  ├─ memory/                 # （DEPRECATED）旧 MEMORY.md，长期记忆已迁至 PG + ChromaDB
 │  ├─ scripts/                # 评测脚本（BM25 离线 + RAGAS 在线）
 │  ├─ sessions/               # 会话历史（JSON + Redis）
 │  ├─ skills/                 # 技能目录（SKILL.md 定义）
@@ -92,7 +86,7 @@ flowchart LR
 
 - Python 3.10+
 - FastAPI + Uvicorn
-- LangChain 1.x（ReAct Agent + MCP Adapters）+ LlamaIndex（向量索引）
+- LangChain 1.x（ReAct Agent + MCP Adapters）+ ChromaDB（向量索引）+ OpenAI 兼容 Embedding 客户端
 - MCP (Model Context Protocol) — stdio transport，`langchain-mcp-adapters` 桥接为 LangChain Tool
 - Redis（可选，连接失败自动降级）
 - OpenAI-compatible API（百炼 / 智谱 / DeepSeek / OpenAI）
@@ -131,6 +125,10 @@ SUMMARY_BASE_URL=https://api.deepseek.com
 
 # 模型上下文窗口
 MAX_CONTEXT_TOKENS=128000
+
+# 短期记忆自动压缩（可选，不配则用默认值）
+AUTO_COMPRESS_TOKEN_LIMIT=12000
+SUMMARY_CHAIN_TOKEN_LIMIT=3000
 ```
 
 ## 快速开始
@@ -186,4 +184,4 @@ python backend/scripts/evaluate_ragas.py --output storage/eval_outputs/ragas_ful
 
 - 适合本地开发和研究，不是生产级 SaaS
 - 知识索引启动时首次构建较慢（需调用 embedding API），后续从磁盘加载
-- Excel / PDF 依赖技能链路处理
+- PDF 已纳入全量索引（PyMuPDF 按页切分）；Excel 暂不索引（表格行数据对 RAG 召回价值低）

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -94,11 +95,14 @@ class SessionManager:
     def _write_session(self, record: dict[str, Any]) -> None:
         session_id = str(record["id"])
         record["updated_at"] = time.time()
-        # 写磁盘（冷存储，永久保留）
-        self._session_path(session_id).write_text(
+        # 写磁盘（冷存储，永久保留）：先写临时文件再原子替换，防多进程读到半写状态
+        path = self._session_path(session_id)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
             json.dumps(record, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        os.replace(tmp_path, path)
         # 写 Redis（热存储，7 天 TTL）
         self._redis_write(record)
 
@@ -194,17 +198,34 @@ class SessionManager:
     def set_title(self, session_id: str, title: str) -> dict[str, Any]:
         return self.rename_session(session_id, title)
 
+    def set_record_field(self, session_id: str, key: str, value: Any) -> dict[str, Any]:
+        """写入会话记录的加性自定义字段（如记忆抽取游标 memory_extracted_until）。
+
+        仅后端内部使用，前端 SessionHistory / toUiMessages 不读该字段，无契约影响。
+        """
+        record = self._read_session_file(session_id)
+        record[key] = value
+        self._write_session(record)
+        return record
+
     def delete_session(self, session_id: str) -> None:
         path = self._session_path(session_id)
         if path.exists():
             path.unlink()
         redis_client.delete(self._redis_key(session_id))
 
-    def compress_history(self, session_id: str, summary: str, n_messages: int) -> dict[str, int]:
+    def compress_history(self, session_id: str, context: str, n_messages: int) -> dict[str, int]:
+        """压缩会话历史：归档前 n 条，写入完整的压缩摘要链。
+
+        `context` 由调用方拼好（已有摘要 + 新摘要，必要时已折叠），
+        方法只负责落盘，不再自行 append，避免双重追加。
+        """
         record = self._read_session_file(session_id)
         messages = record.get("messages", [])
-        archived = messages[:n_messages] # 前一半要归档
-        remaining = messages[n_messages:] # 后一半保留
+        # clamp：后台场景下消息数可能已变化，防止误归档新消息
+        n = min(n_messages, len(messages))
+        archived = messages[:n] # 前 n 条要归档
+        remaining = messages[n:] # 后段保留
         # 原始消息归档到磁盘
         archive_path = self.archive_dir / f"{session_id}_{int(time.time())}.json"
         archive_payload = {
@@ -216,13 +237,9 @@ class SessionManager:
             json.dumps(archive_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        # 摘要拼接到 compressed_context
-        existing_summary = record.get("compressed_context", "").strip()
-        if existing_summary:
-            record["compressed_context"] = f"{existing_summary}\n---\n{summary.strip()}"
-        else:
-            record["compressed_context"] = summary.strip()
-        record["messages"] = remaining# 只保留后一半
+        # context 为调用方拼好的完整摘要链，直接写入
+        record["compressed_context"] = context.strip()
+        record["messages"] = remaining # 只保留后段
         self._write_session(record)
         return {
             "archived_count": len(archived),

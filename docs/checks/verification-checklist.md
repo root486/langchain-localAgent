@@ -12,9 +12,10 @@
 ## 修改检索逻辑后的验证
 
 - [ ] **检索正确性**：用已知 query 验证检索结果是否符合预期
-- [ ] **索引完整性**：manifest.json 中的 chunk 数量 == vector index 的 node 数量（粗略检查）
+- [ ] **索引完整性**：manifest.json 中的 chunk 数量 == ChromaDB collection 的 count（粗略检查）
+- [ ] **PDF 索引**：知识库含 `.pdf` 时 rebuild 后 manifest 出现 `source_type="pdf"` 的 chunk；扫描版（纯图片）PDF 自动跳过不崩溃
 - [ ] **BM25 可用**：在 `vector_ready=false` 的情况下，BM25 检索仍然能返回结果
-- [ ] **RRF 融合**：三路（skill/vector/bm25）证据融合后无重复、无丢失
+- [ ] **RRF 融合**：两路（vector/bm25）证据融合后无重复、无丢失
 
 ## 修改 Embedding/索引逻辑后的验证
 

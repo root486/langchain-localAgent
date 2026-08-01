@@ -5,9 +5,6 @@
 项目中所有核心模块都使用模块级单例模式（文件底部实例化）：
 
 ```python
-# config.py
-runtime_config = RuntimeConfigManager(get_settings().backend_dir / "config.json")
-
 # knowledge_retrieval/indexer.py
 knowledge_indexer = KnowledgeIndexer()
 
@@ -17,11 +14,8 @@ knowledge_orchestrator = KnowledgeOrchestrator()
 # knowledge_retrieval/hybrid_retriever.py
 hybrid_retriever = HybridRetriever()
 
-# knowledge_retrieval/skill_retriever_agent.py
-skill_retriever_agent = SkillRetrieverAgent()
-
-# graph/memory_indexer.py
-memory_indexer = MemoryIndexer()
+# graph/memory_store.py
+memory_store = MemoryStore()
 
 # graph/agent.py
 agent_manager = AgentManager()
@@ -34,13 +28,13 @@ agent_manager = AgentManager()
 ```
 1. get_settings()              → 加载 .env 配置（@lru_cache，只执行一次）
 2. refresh_snapshot()           → 生成 SKILLS_SNAPSHOT.md
-3. agent_manager.initialize()  → 内部依次执行:
-   3a. SessionManager(base_dir) → 创建 sessions 目录
-   3b. get_all_tools(base_dir)  → 实例化工具
-   3c. knowledge_orchestrator.configure(base_dir, model_builder)
-       → 内部: skill_retriever_agent.configure(base_dir, model_builder)
-4. memory_indexer.configure()  → 创建 storage/memory_index 目录
-5. memory_indexer.rebuild_index() → 加载/重建 memory 向量索引
+3. _init_mcp_tools()           → 按 key 加载 MCP 工具（Tavily stdio + 高德 streamable http，逐个 server 用 _load_server_tools 带超时+重试；单个失败不影响其它）
+4. agent_manager.initialize(base_dir, mcp_tools) → 内部依次执行:
+   4a. SessionManager(base_dir) → 创建 sessions 目录
+   4b. get_all_tools(base_dir)  → 实例化工具
+   4c. knowledge_orchestrator.configure(base_dir, model_builder)
+       → 配置检索编排器（Multi-Query 展开依赖 model_builder）
+5. memory_store.configure()    → PG 连接池 + 建 memories 表/索引 + ChromaDB memory_facts（PG 或 embedding 不可用时自动降级，is_ready()=False）
 6. knowledge_indexer.configure() → 创建 storage/knowledge 子目录 + _load_manifest + _load_vector_index
 7. knowledge_indexer.rebuild_index() → 重建 knowledge 索引
 ```

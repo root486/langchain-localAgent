@@ -6,7 +6,6 @@ import {
   createSession,
   deleteSession,
   getKnowledgeIndexStatus,
-  getRagMode,
   getSessionHistory,
   getSessionTokens,
   listSessions,
@@ -15,7 +14,6 @@ import {
   renameSession,
   rebuildKnowledgeIndex as rebuildKnowledgeIndexRequest,
   saveFile,
-  setRagMode,
   streamChat,
   type Evidence,
   type KnowledgeIndexStatus,
@@ -43,7 +41,6 @@ type AppStore = {
   currentSessionId: string | null;
   messages: Message[];
   isStreaming: boolean;
-  ragMode: boolean;
   skills: Array<{ name: string; description: string; path: string }>;
   editableFiles: string[];
   inspectorPath: string;
@@ -56,7 +53,6 @@ type AppStore = {
   createNewSession: () => Promise<void>;
   selectSession: (sessionId: string) => Promise<void>;
   sendMessage: (value: string) => Promise<void>;
-  toggleRagMode: () => Promise<void>;
   renameCurrentSession: (title: string) => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
   loadInspectorFile: (path: string) => Promise<void>;
@@ -70,7 +66,6 @@ type AppStore = {
 const FIXED_FILES = [
   "workspace/SOUL.md",
   "workspace/IDENTITY.md",
-  "memory/MEMORY.md",
   "SKILLS_SNAPSHOT.md"
 ];
 
@@ -99,7 +94,7 @@ function normalizeEvidence(value: unknown): Evidence | null {
     source_type: String(item.source_type ?? ""),
     locator: String(item.locator ?? ""),
     snippet: String(item.snippet ?? ""),
-    channel: (item.channel as Evidence["channel"]) ?? "skill",
+    channel: (item.channel as Evidence["channel"]) ?? "fused",
     score: Number.isFinite(score) ? score : null,
     parent_id: item.parent_id ? String(item.parent_id) : null
   };
@@ -142,9 +137,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [ragMode, setRagModeState] = useState(false);
   const [skills, setSkills] = useState<Array<{ name: string; description: string; path: string }>>([]);
-  const [inspectorPath, setInspectorPath] = useState("memory/MEMORY.md");
+  const [inspectorPath, setInspectorPath] = useState("workspace/SOUL.md");
   const [inspectorContent, setInspectorContent] = useState("");
   const [inspectorDirty, setInspectorDirty] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(308);
@@ -336,17 +330,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  async function toggleRagMode() {
-    const next = !ragMode;
-    setRagModeState(next);
-    try {
-      await setRagMode(next);
-    } catch (error) {
-      setRagModeState(!next);
-      throw error;
-    }
-  }
-
   async function renameCurrentSession(title: string) {
     if (!currentSessionId || !title.trim()) {
       return;
@@ -397,15 +380,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     void (async () => {
-      const [initialSessions, rag, initialSkills, initialKnowledgeIndexStatus] = await Promise.all([
+      const [initialSessions, initialSkills, initialKnowledgeIndexStatus] = await Promise.all([
         listSessions(),
-        getRagMode(),
         listSkills(),
         getKnowledgeIndexStatus()
       ]);
 
       setSessions(initialSessions);
-      setRagModeState(rag.enabled);
       setSkills(initialSkills);
       setKnowledgeIndexStatus(initialKnowledgeIndexStatus);
 
@@ -418,7 +399,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setSessions([created]);
       }
 
-      const file = await loadFile("memory/MEMORY.md");
+      const file = await loadFile("workspace/SOUL.md");
       setInspectorPath(file.path);
       setInspectorContent(file.content);
     })();
@@ -441,7 +422,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     currentSessionId,
     messages,
     isStreaming,
-    ragMode,
     skills,
     editableFiles,
     inspectorPath,
@@ -454,7 +434,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     createNewSession,
     selectSession,
     sendMessage,
-    toggleRagMode,
     renameCurrentSession,
     removeSession,
     loadInspectorFile,

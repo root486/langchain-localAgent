@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from langsmith import traceable
+
 from knowledge_retrieval.types import Evidence
 
 #为一条 Evidence 生成唯一的key（文件路径|定位器（文件内位置）|片段前240个字符）。
@@ -10,10 +12,11 @@ def _dedupe_key(item: Evidence) -> str:
     return f"{item.source_path}|{item.locator}|{normalized_snippet[:240]}"
 
 
+@traceable(run_type="chain", name="rrf_fusion")
 def reciprocal_rank_fusion(
     evidence_lists: Iterable[list[Evidence]],
     *,
-    top_k: int = 6,
+    top_k: int = 4,
     rank_constant: int = 60,
 ) -> list[Evidence]:
     scores: dict[str, float] = {}

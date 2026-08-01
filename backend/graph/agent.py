@@ -1,32 +1,26 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
+from langsmith import traceable
 
 try:
     from langchain_deepseek import ChatDeepSeek
 except ImportError:  # pragma: no cover - optional dependency at runtime
     ChatDeepSeek = None
 
-from config import get_settings, runtime_config
-from graph.memory_indexer import memory_indexer
+from cache.rag_cache import rag_cache
+from config import get_settings
+from graph.memory_store import memory_store
 from graph.prompt_builder import build_system_prompt
 from graph.session_manager import SessionManager
-from knowledge_retrieval import knowledge_orchestrator
+from knowledge_retrieval import knowledge_indexer, knowledge_orchestrator
+from knowledge_retrieval.router import match_explicit, match_fallback, route
 from tools import get_all_tools
-
-KNOWLEDGE_SKILL_PATTERNS = (
-    re.compile(r"知识库"),
-    re.compile(r"\bknowledge\b", re.IGNORECASE),
-    re.compile(r"根据.+?(知识库|文档|资料)"),
-    re.compile(r"(查|检索).+?(文档|资料|报告|白皮书)"),
-    re.compile(r"\.(pdf|xlsx|xls|json)\b", re.IGNORECASE),
-)
 
 
 def _stringify_content(content: Any) -> str:
@@ -91,7 +85,7 @@ class AgentManager:
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
 
-        system_prompt = build_system_prompt(self.base_dir, runtime_config.get_rag_mode())
+        system_prompt = build_system_prompt(self.base_dir)
         #如果约束指令（用来控制 AI 的行为方式），添加到系统提示词中
         if extra_instructions:
             system_prompt = f"{system_prompt}\n\n" + "\n\n".join(extra_instructions)
@@ -100,9 +94,25 @@ class AgentManager:
             tools=self.tools if tools_override is None else tools_override,#如果有指定工具，则使用指定的工具，没有则默认使用全部工具
             system_prompt=system_prompt,
         )
-    #判断是否是知识库查询
-    def _is_knowledge_query(self, message: str) -> bool:
-        return any(pattern.search(message) for pattern in KNOWLEDGE_SKILL_PATTERNS)
+    # 判断是否进知识库检索：显式关键词直通 + LLM 二分类路由（失败回退关键词，见 knowledge_retrieval/router.py）
+    @traceable(run_type="chain", name="route_knowledge_query")
+    async def _route_knowledge_query(self, message: str) -> bool:
+        settings = get_settings()
+        # 开关关闭 → 完全退回改动前的关键词判断
+        if not settings.rag_router_enabled:
+            return match_fallback(message)
+        # 知识库空 / 未建索引 → 不路由（省掉无意义的 LLM 调用）
+        if not knowledge_indexer.status().ready:
+            return False
+        # 显式提到知识库 → 快速通道，跳过 LLM
+        if match_explicit(message):
+            return True
+        # LLM 判断；失败/超时返回 None → 回退关键词
+        inventory = "\n".join(f"- {p}" for p in knowledge_indexer.source_paths(40))
+        decision = await route(message, inventory, self._build_router_model)
+        if decision is not None:
+            return decision
+        return match_fallback(message)
 
     def _build_messages(self, history: list[dict[str, Any]]) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
@@ -119,7 +129,7 @@ class AgentManager:
         #遍历检索结果并编号
         for idx, item in enumerate(results, start=1):
             text = str(item.get("text", "")).strip()
-            source = str(item.get("source", "memory/MEMORY.md"))
+            source = str(item.get("source", "memory"))
             lines.append(f"{idx}. Source: {source}\n{text}")
         return "\n\n".join(lines)
 
@@ -132,7 +142,7 @@ class AgentManager:
             "message": "已将 Memory 召回结果注入当前请求上下文。",
             "results": [
                 {
-                    "source_path": str(item.get("source", "memory/MEMORY.md")),
+                    "source_path": str(item.get("source", "memory")),
                     "source_type": "memory",
                     "locator": "memory",
                     "snippet": str(item.get("text", "")).strip(),
@@ -149,8 +159,6 @@ class AgentManager:
         lines.append(f"Status: {retrieval_result.status}")
         if retrieval_result.reason:
             lines.append(f"Reason: {retrieval_result.reason}")
-        if retrieval_result.fallback_used:
-            lines.append("Fallback: skill evidence was insufficient, so vector/BM25 retrieval was used.")
         if not retrieval_result.evidences:
             lines.append("No direct evidence was found.")
             return "\n".join(lines)
@@ -184,7 +192,7 @@ class AgentManager:
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
 
-        system_prompt = build_system_prompt(self.base_dir, runtime_config.get_rag_mode())
+        system_prompt = build_system_prompt(self.base_dir)
         if extra_instructions:
             system_prompt = f"{system_prompt}\n\n" + "\n\n".join(extra_instructions)
 
@@ -200,6 +208,14 @@ class AgentManager:
 
         yield {"type": "done", "content": "".join(final_content_parts).strip()}
 
+    @traceable(
+        run_type="chain",
+        name="rag_agent",
+        process_inputs=lambda i: {
+            "message": i.get("message"),
+            "history_len": len(i.get("history") or []),
+        },
+    )
     async def astream(
         self,
         message: str,
@@ -208,31 +224,33 @@ class AgentManager:
         if self.base_dir is None:
             raise RuntimeError("AgentManager is not initialized")
 
-        rag_mode = runtime_config.get_rag_mode()
         augmented_history = list(history)
-        #RAG模式
-        if rag_mode:
-            retrievals = memory_indexer.retrieve(message, top_k=3)
+        # 长期记忆：PG 结构化事实 + ChromaDB 召回。记忆常开（MEMORY.md 静态注入已废弃）
+        if memory_store.is_ready():
+            retrievals = memory_store.retrieve(message, top_k=3)
             if retrievals:
                 yield {"type": "retrieval", **self._format_memory_retrieval_step(retrievals)}# 推检索步骤给前端
-
-
-            if retrievals:
                 augmented_history.append(
                     {
                         "role": "assistant",
                         "content": self._format_retrieval_context(retrievals),
                     }
                 )
-        #命中知识库关键词，触发知识库检索
-        if self._is_knowledge_query(message):
+        # 路由判断进知识库：显式关键词直通 + LLM 二分类（失败回退关键词）
+        if await self._route_knowledge_query(message):
             knowledge_result = None
-            async for event in knowledge_orchestrator.astream(message):
-                # 将编排器内部的中间过程事件（如工具调用）直接推送给前端
-                if event.get("type") == "orchestrated_result":
-                    knowledge_result = event["result"]
-                    continue
-                yield event
+            # 语义缓存：命中时直接复用检索证据，跳过 Multi-Query/混合检索/Rerank（仍生成答案）
+            if rag_cache.enabled:
+                knowledge_result = rag_cache.get(message)
+            if knowledge_result is None:
+                async for event in knowledge_orchestrator.astream(message):
+                    # 将编排器内部的中间过程事件（如工具调用）直接推送给前端
+                    if event.get("type") == "orchestrated_result":
+                        knowledge_result = event["result"]
+                        continue
+                    yield event
+                if knowledge_result is not None:
+                    rag_cache.put(message, knowledge_result)
             # 将编排器整理后的检索步骤逐个推送给前端
             if knowledge_result is not None:
                 for step in knowledge_result.steps:
@@ -340,6 +358,21 @@ class AgentManager:
             return title[:10] or "新会话"
         except Exception:
             return (first_user_message.strip() or "新会话")[:10]
+    # 路由判断专用模型：默认 DeepSeek Flash（便宜，路由是简单二分类）。
+    # 级联回退：RAG_ROUTER_API_KEY → SUMMARY_API_KEY（复用 flash）→ 主模型
+    def _build_router_model(self):
+        settings = get_settings()
+        if settings.router_api_key:
+            return ChatOpenAI(
+                model=settings.router_model or "deepseek-v4-flash",
+                api_key=settings.router_api_key,
+                base_url=settings.router_base_url or "https://api.deepseek.com",
+                temperature=0,
+            )
+        if settings.summary_api_key:
+            return self._build_summary_model()
+        return self._build_chat_model()
+
     #摘要压缩
     def _build_summary_model(self):
         """摘要压缩专用模型：默认走 DeepSeek Flash，便宜且摘要不需要强推理。
@@ -379,6 +412,28 @@ class AgentManager:
             return summary[:200]
         except Exception:
             return transcript[:500]
+
+    async def recompress_context(self, existing: str) -> str:
+        """把多条压缩摘要折叠成一条连贯摘要（≤300 字），防止 compressed_context 无界增长。"""
+        existing = existing.strip()
+        if not existing:
+            return ""
+        prompt = (
+            "以下是一段长对话的多次压缩摘要。请把它们合并成一条连贯的中文摘要，"
+            "不超过 300 字，保留所有关键事实：用户是谁、做过什么决定、还有哪些未解决问题。"
+            "不要解释，直接输出合并后的摘要。"
+        )
+        try:
+            response = await self._build_summary_model().ainvoke(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": existing},
+                ]
+            )
+            summary = _stringify_content(getattr(response, "content", "")).strip()
+            return summary[:300] or existing[:300]
+        except Exception:
+            return existing[:300]
 
 
 agent_manager = AgentManager()

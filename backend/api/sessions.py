@@ -5,7 +5,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from config import runtime_config
 from graph.agent import agent_manager
 from graph.prompt_builder import build_system_prompt
 
@@ -63,7 +62,7 @@ async def get_session_messages(session_id: str) -> dict[str, Any]:
     if session_manager is None or agent_manager.base_dir is None:
         raise HTTPException(status_code=503, detail="Agent manager is not initialized")
     return {
-        "system_prompt": build_system_prompt(agent_manager.base_dir, runtime_config.get_rag_mode()),
+        "system_prompt": build_system_prompt(agent_manager.base_dir),
         "messages": session_manager.load_session(session_id),
     }
 

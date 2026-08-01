@@ -1,6 +1,6 @@
 "use client";
 
-import { Database, FileSearch, Layers3, Search, Sparkles, type LucideIcon } from "lucide-react";
+import { ArrowUpDown, Database, FileSearch, type LucideIcon } from "lucide-react";
 
 import type { RetrievalStep } from "@/lib/api";
 
@@ -19,18 +19,6 @@ const STEP_META: Record<
     border: "border-[rgba(15,139,141,0.16)] bg-[rgba(15,139,141,0.06)]",
     badge: "bg-[rgba(15,139,141,0.12)] text-ocean"
   },
-  skill: {
-    label: "Skill",
-    icon: Search,
-    border: "border-[rgba(13,37,48,0.1)] bg-[rgba(13,37,48,0.04)]",
-    badge: "bg-[rgba(13,37,48,0.08)] text-[var(--color-ink)]"
-  },
-  fallback: {
-    label: "Fallback",
-    icon: Sparkles,
-    border: "border-[rgba(212,106,74,0.18)] bg-[rgba(212,106,74,0.08)]",
-    badge: "bg-[rgba(212,106,74,0.12)] text-[var(--color-ember)]"
-  },
   vector: {
     label: "Vector",
     icon: Database,
@@ -43,11 +31,11 @@ const STEP_META: Record<
     border: "border-[rgba(13,37,48,0.1)] bg-[rgba(13,37,48,0.04)]",
     badge: "bg-[rgba(13,37,48,0.08)] text-[var(--color-ink)]"
   },
-  fused: {
-    label: "Fused",
-    icon: Layers3,
-    border: "border-[rgba(15,139,141,0.16)] bg-[rgba(15,139,141,0.06)]",
-    badge: "bg-[rgba(15,139,141,0.12)] text-ocean"
+  rerank: {
+    label: "Rerank",
+    icon: ArrowUpDown,
+    border: "border-[rgba(212,106,74,0.18)] bg-[rgba(212,106,74,0.08)]",
+    badge: "bg-[rgba(212,106,74,0.12)] text-[var(--color-ember)]"
   }
 };
 
@@ -65,7 +53,7 @@ export function RetrievalCard({ steps }: { steps: RetrievalStep[] }) {
 
       <div className="mt-3 space-y-3">
         {steps.map((step, index) => {
-          const meta = STEP_META[step.stage] ?? STEP_META.skill;
+          const meta = STEP_META[step.stage] ?? STEP_META.vector;
           const Icon = meta.icon;
 
           return (

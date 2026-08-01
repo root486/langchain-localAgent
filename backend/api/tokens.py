@@ -6,7 +6,6 @@ import tiktoken
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from config import runtime_config
 from graph.agent import agent_manager
 from graph.prompt_builder import build_system_prompt
 
@@ -30,7 +29,7 @@ async def session_tokens(session_id: str) -> dict[str, int]:
         raise HTTPException(status_code=503, detail="Agent manager is not initialized")
 
     record = session_manager.get_history(session_id)
-    system_prompt = build_system_prompt(agent_manager.base_dir, runtime_config.get_rag_mode())
+    system_prompt = build_system_prompt(agent_manager.base_dir)
     message_text = []
     for item in record.get("messages", []):
         message_text.append(str(item.get("content", "")))

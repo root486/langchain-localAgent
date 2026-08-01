@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Callable
 
+from langsmith import traceable
+
 # ── Router ──
 ROUTER_PROMPT = """判断用户问题类型，只返回 A 或 B：
 A = 单一问题但表述模糊/口语化，只需补全语义
@@ -65,6 +67,12 @@ def _parse_lines(text: str, limit: int = 3) -> list[str]:
     return list(dict.fromkeys(lines))[:limit]
 
 
+@traceable(
+    run_type="chain",
+    name="multi_query_expand",
+    # build_model 是 callable，LangSmith 无法序列化，必须从 inputs 中剔除
+    process_inputs=lambda i: {"question": i.get("question")},
+)
 async def expand(question: str, build_model: Callable) -> list[str]:
     """返回检索用 query 列表（原始 query 排第一位）。
 

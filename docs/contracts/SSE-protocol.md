@@ -6,15 +6,14 @@
 
 | 事件名 | 后端 yield 来源 | 前端处理 | 必须包含的字段 |
 |--------|----------------|----------|---------------|
-| `token` | AgentManager / SkillRetrieverAgent | 拼接到 assistant.content | `content: str` |
-| `tool_start` | AgentManager / SkillRetrieverAgent | 追加一个 output="" 的 toolCall | `tool: str`, `input: str` |
-| `tool_end` | AgentManager / SkillRetrieverAgent | 填充最后一个 toolCall 的 output | `output: str` |
+| `token` | AgentManager | 拼接到 assistant.content | `content: str` |
+| `tool_start` | AgentManager | 追加一个 output="" 的 toolCall | `tool: str`, `input: str` |
+| `tool_end` | AgentManager | 填充最后一个 toolCall 的 output | `output: str` |
 | `retrieval` | AgentManager (memory) / KnowledgeOrchestrator (knowledge) | normalizeRetrievalStep → 追加到 retrievalSteps | `kind`, `stage`, `title`, `message`, `results[]` |
 | `new_response` | AgentManager (普通对话) | 创建新的 assistant 消息对象 | 无 |
-| `done` | AgentManager / SkillRetrieverAgent | 兜底填充 content（如果为空） | `content: str` |
+| `done` | AgentManager | 兜底填充 content（如果为空） | `content: str` |
 | `title` | AgentManager (首条消息后) | 刷新会话列表 | `session_id: str`, `title: str` |
 | `error` | chat.py 异常处理 | 显示错误 | `error: str` |
-| `skill_result` | SkillRetrieverAgent | **前端不处理**（被 orchestrator 消费） | — |
 | `orchestrated_result` | KnowledgeOrchestrator | **前端不处理**（被 agent.py 消费） | — |
 
 ## 事件顺序约束

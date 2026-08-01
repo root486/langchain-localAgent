@@ -9,7 +9,7 @@ export type Evidence = {
   source_type: string;
   locator: string;
   snippet: string;
-  channel: "memory" | "skill" | "vector" | "bm25" | "fused";
+  channel: "memory" | "vector" | "bm25" | "fused";
   score: number | null;
   parent_id: string | null;
 };
@@ -145,18 +145,6 @@ export async function saveFile(path: string, content: string) {
     body: JSON.stringify({ path, content })
   });
 }
-
-export async function getRagMode() {
-  return request<{ enabled: boolean }>("/config/rag-mode");
-}
-
-export async function setRagMode(enabled: boolean) {
-  return request<{ enabled: boolean }>("/config/rag-mode", {
-    method: "PUT",
-    body: JSON.stringify({ enabled })
-  });
-}
-
 
 export async function getKnowledgeIndexStatus() {
   return request<KnowledgeIndexStatus>("/knowledge/index/status");

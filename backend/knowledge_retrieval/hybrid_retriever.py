@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from langsmith import traceable
+
 from knowledge_retrieval.indexer import knowledge_indexer
 from knowledge_retrieval.types import HybridRetrievalResult
 
 
 class HybridRetriever:
+    @traceable(run_type="retriever", name="hybrid_retrieve")
     def retrieve(
         self,
         query: str,

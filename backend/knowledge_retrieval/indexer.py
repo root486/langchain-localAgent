@@ -1,38 +1,23 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import threading
 import time
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from llama_index.core import Document, Settings as LlamaSettings, StorageContext, VectorStoreIndex, load_index_from_storage
-from llama_index.embeddings.openai import OpenAIEmbedding
+import chromadb
+import jieba
+from rank_bm25 import BM25Okapi
+from langsmith import traceable
 
 from config import get_settings
+from embeddings_client import EmbeddingClient
 from knowledge_retrieval.types import Evidence, IndexStatus
 
-
-# Monkey-patch: 允许非 OpenAI 官方的 embedding 模型名（如 Bailian 的 text-embedding-v4）
-# LlamaIndex 的 OpenAIEmbedding 会在构造时校验模型名是否在 OpenAIEmbeddingModelType 枚举中，
-# 导致第三方兼容 API 的模型名被拒绝。此补丁让 get_engine 在遇到未知模型名时直接返回模型名。
-def _patch_llama_index_get_engine() -> None:
-    import llama_index.embeddings.openai.base as _embed_base
-    _orig = _embed_base.get_engine
-
-    def _patched(mode: str, model: str, mode_model_dict: dict) -> str:
-        try:
-            return _orig(mode, model, mode_model_dict)
-        except ValueError:
-            return model
-
-    _embed_base.get_engine = _patched
-
-
-_patch_llama_index_get_engine()
+# 屏蔽 jieba 首次分词时的 "Building prefix dict" 启动日志
+jieba.setLogLevel(60)
 
 
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.*)$")
@@ -44,18 +29,26 @@ SENT_BOUNDARY = re.compile(r"[\u3002\uff01\uff1f\uff1b\n](?=\S)")
 MAX_CONTEXT_CHARS = 1500
 # \u6700\u5c0f chunk \u5927\u5c0f\uff1a\u4f4e\u4e8e\u6b64\u503c\u7684\u76f8\u90bb\u540c parent chunk \u4f1a\u88ab\u5408\u5e76
 MIN_CHUNK_SIZE = 60
+# BM25 参数（rank_bm25 BM25Okapi）
+# b 调成 0.25：本语料 chunk 长度差异大（FAQ 短问题 + 长 answer），
+# b=0.75 默认值会过度惩罚长 chunk，导致精确匹配的 FAQ 记录被压制。
+# 实测 FAQ top-1 命中率：b=0.75 → 89.2%，b=0.25 → 95.0%（旧手写实现 93.3%）。
+BM25_K1 = 1.5
+BM25_B = 0.25
+# ChromaDB 知识库 collection 名
+VECTOR_COLLECTION_NAME = "knowledge_chunks"
 
 
 class KnowledgeIndexer:
     def __init__(self) -> None:
         self.base_dir: Path | None = None # 项目根目录
-        self._vector_index: VectorStoreIndex | None = None# LlamaIndex向量索引对象
+        self._chroma_client: Any | None = None# ChromaDB PersistentClient（懒加载）
+        self._vector_collection: Any | None = None# ChromaDB 知识库 collection
         self._documents: list[dict[str, Any]] = []# 所有chunk的列表
         self._lock = threading.Lock()  # 线程锁（防止并发重建）
         self._building = False # 是否正在建索引
         self._last_built_at: float | None = None # 上次建索引时间
-        self._avg_doc_length = 0.0 # BM25用：平均文档长度
-        self._document_frequencies: Counter[str] = Counter()# BM25用：每个词出现在多少文档中
+        self._bm25: BM25Okapi | None = None # rank_bm25 索引（configure/rebuild 时构建）
         self._vector_ready = False # 向量索引是否就绪
         self._bm25_ready = False # BM25索引是否就绪
 
@@ -64,8 +57,6 @@ class KnowledgeIndexer:
         self.base_dir = base_dir
         self._storage_dir.mkdir(parents=True, exist_ok=True) # storage/knowledge/
         self._vector_dir.mkdir(parents=True, exist_ok=True) # storage/knowledge/vector/
-        self._bm25_dir.mkdir(parents=True, exist_ok=True) # storage/knowledge/bm25/
-        self._derived_dir.mkdir(parents=True, exist_ok=True) # storage/knowledge/derived/
         self._load_manifest() # 从磁盘加载chunk数据
         self._load_vector_index() # 从磁盘加载向量索引
 
@@ -90,24 +81,23 @@ class KnowledgeIndexer:
         return self._storage_dir / "vector"
 
     @property
-    def _bm25_dir(self) -> Path:
-        return self._storage_dir / "bm25"
-
-    @property
-    def _derived_dir(self) -> Path:
-        return self._storage_dir / "derived"
+    def _chroma_dir(self) -> Path:
+        # ChromaDB 持久化目录（chroma.sqlite3 + index/），旧 LlamaIndex JSON 同目录并存
+        return self._vector_dir / "chroma"
 
     def _supports_embeddings(self) -> bool:
         return bool(get_settings().embedding_api_key)
 
-    def _build_embed_model(self) -> OpenAIEmbedding:
-        settings = get_settings()
-        return OpenAIEmbedding(
-            api_key=settings.embedding_api_key,
-            api_base=settings.embedding_base_url,
-            model=settings.embedding_model,
-            embed_batch_size=10,  # 百炼 text-embedding-v4 限制最大 10
-        )
+    def _get_chroma_client(self) -> chromadb.ClientAPI:
+        """懒加载 ChromaDB 嵌入式客户端（本地 SQLite，无需服务端）。"""
+        if self._chroma_client is None:
+            from chromadb.config import Settings as ChromaSettings
+
+            self._chroma_client = chromadb.PersistentClient(
+                path=str(self._chroma_dir),
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+        return self._chroma_client
 
     def status(self) -> IndexStatus:
         return IndexStatus(
@@ -121,6 +111,13 @@ class KnowledgeIndexer:
 
     def is_building(self) -> bool:
         return self._building
+
+    def source_paths(self, max_entries: int = 40) -> list[str]:
+        """返回去重、排序的源文件相对路径（供路由 prompt 展示索引覆盖范围）。"""
+        if not self._documents:
+            return []
+        paths = sorted({str(item.get("source_path", "")) for item in self._documents})
+        return paths[:max_entries]
     #建索引的主要方法，先读文件切分成chunk，然后持久化到manifest.json，再统计BM25数据，最后建向量索引
     def rebuild_index(self) -> None:
         if self.base_dir is None:
@@ -131,7 +128,7 @@ class KnowledgeIndexer:
             try:
                 self._documents = self._build_documents()# 读文件+切分
                 self._write_manifest()  # 持久化到manifest.json
-                self._prepare_bm25_stats()# 统计BM25数据
+                self._build_bm25_index()# 构建 BM25 索引（rank_bm25）
                 self._build_vector_index()   # 建向量索引
                 self._last_built_at = time.time()
             finally:
@@ -155,6 +152,12 @@ class KnowledgeIndexer:
                 documents.extend(self._split_markdown(path))# md文件按标题切
             elif suffix == ".json":
                 documents.extend(self._split_json(path))# json文件按记录切
+            elif suffix == ".pdf":
+                documents.extend(self._split_pdf(path))# pdf文件按页切
+            # .xlsx/.xls 不进索引：表格行数据对 RAG 召回价值低，且原 Skill Agent 已移除
+            # （如需索引，补充 pandas + openpyxl 依赖并实现 _split_excel）
+            # .txt 不进索引：历史提取残留，既有 PDF 同文重复、也有独立内容，用户决定暂不纳入
+            # （如需索引，复用 _split_markdown 的句子边界切分 + 有界 parent_text 即可）
         return documents
 
     def _split_markdown(self, path: Path) -> list[dict[str, Any]]:
@@ -259,6 +262,56 @@ class KnowledgeIndexer:
                     }
                 )
         return chunks
+
+    def _split_pdf(self, path: Path) -> list[dict[str, Any]]:
+        """PDF 按页切分：每页一个 parent，长页按句子边界拆子 chunk。
+
+        文本提取用 PyMuPDF（fitz），对中文报告 PDF（CID 字体）支持最好；
+        提取不到文本的页（如图片封面/扫描页）直接跳过，不崩溃。
+        """
+        try:
+            import fitz  # 延迟导入：仅在有 PDF 文件时加载
+        except ImportError:
+            print(f"[索引] 未安装 pymupdf，跳过 PDF: {path.name}")
+            return []
+
+        source_path = self._relative_path(path)
+        chunks: list[dict[str, Any]] = []
+        try:
+            doc = fitz.open(str(path))
+        except Exception as exc:
+            print(f"[索引] 打开 PDF 失败，跳过: {path.name} ({exc})")
+            return chunks
+
+        try:
+            for page_index, page in enumerate(doc, start=1):
+                try:
+                    page_text = (page.get_text() or "").strip()
+                except Exception:
+                    continue
+                if not page_text:
+                    continue
+                parent_id = f"{source_path}::page::{page_index}"
+                slices = self._split_long_text(page_text)
+                for si, slice_text in enumerate(slices, start=1):
+                    locator = f"第 {page_index} 页"
+                    if len(slices) > 1:
+                        locator = f"{locator} (片段 {si}/{len(slices)})"
+                    chunks.append(
+                        {
+                            "parent_id": parent_id,
+                            "source_path": source_path,
+                            "source_type": "pdf",
+                            "locator": locator,
+                            "text": slice_text,
+                            "parent_text": page_text,
+                        }
+                    )
+        finally:
+            doc.close()
+        # 同页相邻过短片段合并 + 分配 doc_id，与 markdown 路径一致
+        return self._merge_short_chunks(chunks, source_path)
+
     # ---------- 父子 chunk 工具方法 ----------
 
     @staticmethod
@@ -340,96 +393,121 @@ class KnowledgeIndexer:
     def _load_manifest(self) -> None:
         if not self._manifest_path.exists():
             self._documents = []
+            self._bm25 = None
             self._bm25_ready = False
             return
         try:
             payload = json.loads(self._manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             self._documents = []
+            self._bm25 = None
             self._bm25_ready = False
             return
         self._documents = list(payload.get("documents", []))
         self._last_built_at = payload.get("built_at")
-        self._prepare_bm25_stats()
-    #为 BM25 检索准备三个统计数据：平均文档长度、文档频率、词频。
-    def _prepare_bm25_stats(self) -> None:
+        self._build_bm25_index()
+
+    def _build_bm25_index(self) -> None:
+        """用 rank_bm25 构建 Okapi BM25 索引。
+
+        分词：jieba（中文）+ 字母数字正则（英文/数字），k1=1.5, b=0.25（见 BM25_K1/BM25_B）。
+        BM25 索引在加载 manifest 时重建，token 不持久化到 manifest。
+        """
         if not self._documents:
-            self._avg_doc_length = 0.0#平均文档长度（所有chunk的平均token数）
-            self._document_frequencies = Counter()#每个词在多少个文档中出现过（词频）
+            self._bm25 = None
             self._bm25_ready = False
             return
 
-        self._document_frequencies = Counter()
-        doc_lengths: list[int] = []
-        for item in self._documents:
-            tokens = self._tokenize(str(item.get("text", "")))#分词，生成token列表
-            item["tokens"] = tokens
-            doc_lengths.append(len(tokens))
-            for token in set(tokens):
-                self._document_frequencies[token] += 1
-
-        self._avg_doc_length = sum(doc_lengths) / max(1, len(doc_lengths))
-        self._bm25_ready = True
+        corpus = [
+            self._tokenize(str(item.get("text", "")))
+            for item in self._documents
+        ]
+        try:
+            self._bm25 = BM25Okapi(corpus, k1=BM25_K1, b=BM25_B)
+            self._bm25_ready = True
+        except Exception as exc:
+            print(f"[索引] BM25 索引构建失败: {exc}")
+            self._bm25 = None
+            self._bm25_ready = False
 
     def _build_vector_index(self) -> None:
         if not self._supports_embeddings() or not self._documents:
-            self._vector_index = None
+            self._vector_collection = None
             self._vector_ready = False
             return
 
         try:
-            LlamaSettings.embed_model = self._build_embed_model()#配置Embedding模型
-            print(f"[索引] 正在向量化 {len(self._documents)} 个 chunk（批大小=50）...")
-            #把每个 chunk 转成 LlamaIndex 的 Document 对象。text 是要转向量的文本，metadata 是附带信息，检索结果里会原样返回。
-            documents = [
-                Document(
-                    text=str(item["text"]),# chunk的文本内容
-                    metadata={
-                        "doc_id": item["doc_id"],
-                        "parent_id": item["parent_id"],
-                        "source_path": item["source_path"],
-                        "source_type": item["source_type"],
-                        "locator": item["locator"],
-                    },
-                )
-                for item in self._documents
-            ]
-            self._vector_index = VectorStoreIndex.from_documents(documents)#LlamaIndex 对每个 Document 的 text 调用 Embedding 模型，转成向量，建索引。
-            self._vector_index.storage_context.persist(persist_dir=str(self._vector_dir))#把索引存到 storage/knowledge/vector/ 目录，下次启动不用重建。
+            client = self._get_chroma_client()
+            # 重建：先删旧 collection（含旧 LlamaIndex 遗留数据，格式不兼容）
+            try:
+                client.delete_collection(VECTOR_COLLECTION_NAME)
+            except Exception:
+                pass
+            collection = client.get_or_create_collection(
+                name=VECTOR_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+            print(f"[索引] 正在向量化 {len(self._documents)} 个 chunk（批大小=10）...")
+            texts = [str(item["text"]) for item in self._documents]
+            embeddings = EmbeddingClient().embed(texts)
+            collection.add(
+                # id 仅需唯一；真实 doc_id 存在 metadata 里，供检索时回查 manifest
+                ids=[str(i) for i in range(len(self._documents))],
+                documents=texts,
+                embeddings=embeddings,
+                metadatas=[
+                    {
+                        "doc_id": str(item["doc_id"]),
+                        "parent_id": str(item.get("parent_id") or ""),
+                        "source_path": str(item["source_path"]),
+                        "source_type": str(item["source_type"]),
+                        "locator": str(item["locator"]),
+                    }
+                    for item in self._documents
+                ],
+            )
+            self._vector_collection = collection
             self._vector_ready = True
-            print(f"[索引] 向量化完成，已持久化到 {self._vector_dir}")
+            print(f"[索引] 向量化完成，已持久化到 {self._chroma_dir}")
         except Exception as exc:
             print(f"[索引] 向量化失败: {exc}")
             import traceback
             traceback.print_exc()
-            self._vector_index = None
+            self._vector_collection = None
             self._vector_ready = False
 
     def _load_vector_index(self) -> None:
         if not self._supports_embeddings():
-            self._vector_index = None
+            self._vector_collection = None
             self._vector_ready = False
             return
-        #vector/ 目录是空的 → 没有历史索引，跳过。
-        if not list(self._vector_dir.glob("*")):
-            self._vector_index = None
+        # 没有 ChromaDB 持久化数据（chroma.sqlite3）→ 无历史向量索引，跳过。
+        if not (self._chroma_dir / "chroma.sqlite3").exists():
+            self._vector_collection = None
             self._vector_ready = False
             return
         try:
-            LlamaSettings.embed_model = self._build_embed_model()#配置 Embedding 模型（检索时需要用它把 query 也转向量）
-            storage_context = StorageContext.from_defaults(persist_dir=str(self._vector_dir))
-            self._vector_index = load_index_from_storage(storage_context)#从 storage/knowledge/vector/ 目录加载索引
+            client = self._get_chroma_client()
+            collection = client.get_or_create_collection(
+                name=VECTOR_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+            if collection.count() == 0:
+                self._vector_collection = None
+                self._vector_ready = False
+                return
+            self._vector_collection = collection
             self._vector_ready = True
         except Exception:
-            self._vector_index = None
+            self._vector_collection = None
             self._vector_ready = False
 
     def _ensure_loaded(self) -> None:
         if not self._documents:
             self._load_manifest()
-        if self._vector_index is None and self._supports_embeddings():
+        if self._vector_collection is None and self._supports_embeddings():
             self._load_vector_index()
-    #判断“这个 chunk 属不属于skill agent指定的目录”
+    #判断“这个 chunk 是否匹配指定的 path_filters（目录前缀）”
     def _matches_path_filters(self, source_path: str, path_filters: list[str] | None) -> bool:
         if not path_filters:
             return True
@@ -499,6 +577,7 @@ class KnowledgeIndexer:
 
     # ---------- 检索 ----------
 
+    @traceable(run_type="retriever", name="vector_retrieve")
     def retrieve_vector(
         self,
         query: str,
@@ -507,27 +586,37 @@ class KnowledgeIndexer:
         path_filters: list[str] | None = None,
     ) -> list[Evidence]:
         self._ensure_loaded()
-        if self._vector_index is None:
+        if self._vector_collection is None:
             return []
 
-        retriever = self._vector_index.as_retriever(similarity_top_k=max(top_k * 4, top_k))#创建检索器，先取 top_k×4 个结果。后面要过滤路径，会丢掉一部分，多取保证过滤后还够。
         try:
-            results = retriever.retrieve(query)
+            query_embedding = EmbeddingClient().embed_one(query)
+            results = self._vector_collection.query(
+                query_embeddings=[query_embedding],
+                # 先取 top_k×4 个结果。后面要过滤路径，会丢掉一部分，多取保证过滤后还够。
+                n_results=max(top_k * 4, top_k),
+                include=["metadatas", "distances"],
+            )
         except Exception:
+            return []
+
+        ids = results.get("ids", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+        if not ids or not metadatas:
             return []
 
         payload: list[Evidence] = []
         seen_parents: set[str] = set()  # 按 parent 去重
-        for item in results:
-            node = getattr(item, "node", item)
-            metadata = getattr(node, "metadata", {}) or {}
+        for i, metadata in enumerate(metadatas):
+            metadata = metadata or {}
             source_path = str(metadata.get("source_path", ""))
             if not self._matches_path_filters(source_path, path_filters):
                 continue
             doc_id = str(metadata.get("doc_id", ""))
             raw_parent_id = metadata.get("parent_id")
             parent_id = str(raw_parent_id).strip() if raw_parent_id else None
-            # 同一 parent 只保留最高分的一个结果
+            # 同一 parent 只保留最高分的一个结果（ChromaDB 按距离升序=相似度降序返回，首个即最高分）
             if parent_id and parent_id in seen_parents:
                 continue
             if parent_id:
@@ -541,6 +630,8 @@ class KnowledgeIndexer:
                 if hit_doc
                 else str(metadata.get("parent_text", ""))
             )
+            # ChromaDB cosine 距离 → 相似度（越高越好），语义与旧 LlamaIndex 一致
+            distance = float(distances[i]) if i < len(distances) else 0.0
             payload.append(
                 Evidence(
                     source_path=source_path,
@@ -548,7 +639,7 @@ class KnowledgeIndexer:
                     locator=str(metadata.get("locator", "")),
                     snippet=snippet,
                     channel="vector",
-                    score=float(getattr(item, "score", 0.0) or 0.0),
+                    score=1.0 - distance,
                     parent_id=parent_id,
                 )
             )
@@ -556,57 +647,47 @@ class KnowledgeIndexer:
                 break
         return payload
 
+    @traceable(run_type="retriever", name="bm25_retrieve")
     def retrieve_bm25(
         self,
         query: str,
         *,
         top_k: int = 4,
         path_filters: list[str] | None = None, # 只搜指定目录
-        query_hints: list[str] | None = None,#skill agent改写的query
+        query_hints: list[str] | None = None,#BM25 附加的检索提示词
     ) -> list[Evidence]:
         self._ensure_loaded()
-        if not self._documents or not self._bm25_ready:
+        if not self._documents or not self._bm25_ready or self._bm25 is None:
             return []
 
         hints = " ".join(query_hints or [])
         query_tokens = self._tokenize(f"{query} {hints}".strip())
+        # rank_bm25 的 get_scores 会按 query 词频重复计权，去重避免同一词被重复加分
+        query_tokens = list(dict.fromkeys(query_tokens))
         if not query_tokens:
             return []
 
-        candidates = [
-            item for item in self._documents if self._matches_path_filters(str(item["source_path"]), path_filters)#过滤出指定目录下的 chunk
-        ]
-        if not candidates:
-            candidates = list(self._documents)
-
-        scores: list[tuple[dict[str, Any], float]] = []
-        corpus_size = max(1, len(self._documents))#文档（chunk）总数
-        k1 = 1.5#词频饱和参数
-        b = 0.75#长度惩罚参数
-        for item in candidates:
-            doc_tokens = item.get("tokens", [])# 文档的分词结果
-            if not doc_tokens:
+        # BM25Okapi.get_scores 返回与 self._documents 顺序一一对应的分数数组
+        scores = self._bm25.get_scores(query_tokens)
+        ranked: list[tuple[dict[str, Any], float]] = []
+        for i, item in enumerate(self._documents):
+            if not self._matches_path_filters(str(item["source_path"]), path_filters):
                 continue
-            token_counts = Counter(doc_tokens) # 文档内词频
-            doc_len = len(doc_tokens)# 文档长度
-            score = 0.0
-            for token in query_tokens:# 对查询中的每个词
-                if token not in token_counts:# 文档不包含该词 → 跳过
-                    continue
-                df = self._document_frequencies.get(token, 0) # 该词出现在多少文档中
-                if df <= 0:
-                    continue
-                idf = math.log(1 + ((corpus_size - df + 0.5) / (df + 0.5)))#词越稀有越高
-                freq = token_counts[token]
-                denominator = freq + k1 * (1 - b + b * (doc_len / max(1.0, self._avg_doc_length)))
-                score += idf * ((freq * (k1 + 1)) / max(denominator, 1e-9))
+            score = float(scores[i])
             if score > 0:
-                scores.append((item, score))
+                ranked.append((item, score))
+        # 与旧逻辑一致：path 过滤后无结果则退回全库
+        if not ranked:
+            ranked = [
+                (item, float(scores[i]))
+                for i, item in enumerate(self._documents)
+                if scores[i] > 0
+            ]
 
-        scores.sort(key=lambda item: item[1], reverse=True)
+        ranked.sort(key=lambda pair: pair[1], reverse=True)
         payload: list[Evidence] = []
         seen_parents: set[str] = set()
-        for item, score in scores[:top_k]:
+        for item, score in ranked[:top_k]:
             raw_parent_id = item.get("parent_id")
             parent_id = str(raw_parent_id).strip() if raw_parent_id else None
             # 同一 parent 只保留最高分的一个结果
@@ -629,13 +710,15 @@ class KnowledgeIndexer:
         return payload
 
     def _tokenize(self, text: str) -> list[str]:
+        """分词：英文/数字按词切，中文用 jieba 精确模式。
+
+        与旧手写 unigram+bigram 不同，jieba 产出真实词，符合标准 BM25 用法。
+        保留重复 token（文档词频是 BM25 的输入）；查询端去重在 retrieve_bm25 处理。
+        """
         lowered = text.lower()
-        tokens: list[str] = []
-        tokens.extend(ALNUM_PATTERN.findall(lowered))#英文按单词切，数字也切出来。
-        for match in CHINESE_BLOCK_PATTERN.findall(lowered):#对每个连续中文块，切两种粒度：
-            tokens.extend(list(match))# 1. 每个汉字单独切成token
-            if len(match) > 1:
-                tokens.extend(match[index : index + 2] for index in range(len(match) - 1))# 2. 相邻两个汉字组合成一个token
+        tokens: list[str] = ALNUM_PATTERN.findall(lowered)
+        for block in CHINESE_BLOCK_PATTERN.findall(lowered):
+            tokens.extend(w for w in jieba.lcut(block) if w.strip())
         return tokens
 
 
