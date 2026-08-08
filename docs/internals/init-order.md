@@ -34,7 +34,7 @@ agent_manager = AgentManager()
    4b. get_all_tools(base_dir)  → 实例化工具
    4c. knowledge_orchestrator.configure(base_dir, model_builder)
        → 配置检索编排器（Multi-Query 展开依赖 model_builder）
-5. memory_store.configure()    → PG 连接池 + 建 memories 表（text + float8[] embedding；PG 不可用时自动降级，is_ready()=False）
+5. memory_store.configure()    → ChromaDB PersistentClient + collection（storage/memory/chroma/；初始化失败时自动降级，is_ready()=False）
 6. knowledge_indexer.configure() → 创建 storage/knowledge 子目录 + _load_manifest + _load_vector_index
 7. knowledge_indexer.rebuild_index() → 重建 knowledge 索引
 ```

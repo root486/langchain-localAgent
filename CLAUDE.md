@@ -38,7 +38,7 @@
 | `api/tokens.py` | token 统计 | prompt_builder、session_manager |
 | `api/knowledge_index.py` | 索引 status + rebuild | knowledge_indexer |
 | `graph/agent.py` | **核心**：AgentManager.astream()，三条路径分支，SSE 事件生产 | memory_store、knowledge_orchestrator、session_manager、prompt_builder、tools |
-| `graph/memory_store.py` | **简单长期记忆**：PostgreSQL `memories` 表（text + `embedding float8[]` 向量）+ 应用侧 numpy 余弦召回；写入 = 一次 LLM 抽取 → 批量嵌入 → 余弦去重 → INSERT，无 ChromaDB / 无整合决策器 / 无遗忘规则（仅行数上限裁剪） | config、embeddings_client、numpy、psycopg2 |
+| `graph/memory_store.py` | **简单长期记忆**：纯 ChromaDB 嵌入式 SQLite（`storage/memory/chroma/`，单 collection：documents=text + embeddings 向量 + metadata 存 created_at）；写入 = 一次 LLM 抽取 → 批量嵌入 → 余弦去重 → add；读取 = collection.query 余弦距离 → 阈值过滤 → top_k；无 PostgreSQL / 无整合决策器 / 无遗忘规则（仅行数上限裁剪 `_prune`） | config、embeddings_client、chromadb |
 | `graph/prompt_builder.py` | 系统提示词组装（SOUL/IDENTITY/SKILLS + 长期记忆动态检索说明） | config |
 | `graph/session_manager.py` | 会话持久化（Redis 热层 7 天 TTL + JSON 冷层） | redis_client |
 | `knowledge_retrieval/types.py` | **数据契约**：Evidence / RetrievalStep / HybridRetrievalResult / OrchestratedRetrievalResult / IndexStatus + 枚举 | 全链路 + 前端 |
@@ -65,6 +65,7 @@
 | `backend/SKILLS_SNAPSHOT.md` | 🔧 生成 | 启动时自动重建（`app.py` lifespan 调 `refresh_snapshot`） |
 | `backend/storage/knowledge/manifest.json` | 🔧 生成 | chunk 数据 + BM25 tokens |
 | `backend/storage/knowledge/vector/chroma/` | 🔧 生成 | ChromaDB 向量索引（chroma.sqlite3） |
+| `backend/storage/memory/chroma/` | 🔧 生成 | 长期记忆 ChromaDB collection（chroma.sqlite3，首次写入时创建，与知识库目录隔离） |
 | `backend/sessions/*.json` | 💾 持久化 | 会话记录（Redis 热层 + 文件冷层） |
 | `backend/sessions/archive/*.json` | 💾 持久化 | 自动压缩归档的消息 |
 
@@ -105,8 +106,8 @@
 POST /api/chat (SSE)
   ▼ AgentManager.astream(message, history)
   │
-  ├─ [路径1] 长期记忆检索（记忆常开，PG 单表动态检索）
-  │     memory_store.is_ready() 时 retrieve()（嵌入 query → PG 全表向量余弦召回）
+  ├─ [路径1] 长期记忆检索（记忆常开，ChromaDB 单 collection 动态检索）
+  │     memory_store.is_ready() 时 retrieve()（嵌入 query → collection.query 余弦召回）
   │     → yield retrieval(kind=memory, stage=memory) → 证据注入 augmented_history
   │     → 继续走路径2 或 路径3
   │
@@ -177,8 +178,8 @@ POST /api/chat (SSE)
 | 改 embedding 模型 / provider | **删除 `storage/knowledge/vector/chroma/` + rebuild**，否则维度不匹配 |
 | 增删 `knowledge/` 下文件 | 手动 `POST /api/knowledge/index/rebuild`（无自动检测） |
 | 改 `rebuild_index()` | `finally` 块中 `_building = False` **不能删**（前端轮询依赖）；所有异常路径都要重置 |
-| 改 `graph/memory_store.py` | 写入 = 一次 LLM 抽取 → 批量嵌入 → 余弦去重 → INSERT，读取 = 全表余弦召回；`retrieve` 返回 `{text, score, source}` 需同步 agent.py 格式化；阈值 `MIN_SCORE` / `DEDUP_THRESHOLD` / 行数上限见 docs/reference/hardcoded-values.md |
-| 改 `PG_DSN` / 换 PG 库 | 重启进程（lru_cache）；向量存 PG `memories.embedding`（float8[]），换库后 `configure` 自动建表 |
+| 改 `graph/memory_store.py` | 写入 = 一次 LLM 抽取 → 批量嵌入 → 余弦去重 → add，读取 = collection.query 余弦召回；`retrieve` 返回 `{text, score, source}` 需同步 agent.py 格式化；阈值 `MIN_SCORE` / `DEDUP_THRESHOLD` / 行数上限见 docs/reference/hardcoded-values.md；存储目录 `storage/memory/chroma/` 必须与知识库目录隔离（知识库 rebuild 只删它自己的 collection，物理上不会碰到记忆） |
+| 改 `PG_DSN` / 换 PG 库 | **已不生效**：长期记忆迁至 ChromaDB 后不再读写 PostgreSQL（`pg_dsn` 仅 config 保留解析，无消费方）；改它无副作用 |
 
 ### 4.4 配置改动（.env / config.py）
 
@@ -186,7 +187,7 @@ POST /api/chat (SSE)
 |------|-----------|
 | 改任何 `.env` 值 | **必须重启进程**（`get_settings()` 用 `@lru_cache(maxsize=1)`，进程内不刷新） |
 | 改 `EMBEDDING_MODEL` / `EMBEDDING_PROVIDER` | 重启 + 删 vector 存储 + rebuild（见 4.3） |
-| 改 `PG_DSN` / `DATABASE_URL` | 重启进程；改库后需在库内重建 `memories` 表（`memory_store.configure` 自动建） |
+| 改 `PG_DSN` / `DATABASE_URL` | **已无消费方**（长期记忆迁至 ChromaDB 后不再读 PG），改它无副作用 |
 | 改 `RAG_ROUTER_ENABLED` / `RAG_ROUTER_MODEL` / `RAG_ROUTER_API_KEY` | **必须重启进程**；不配 Key 时路由模型回退 `SUMMARY_API_KEY` → 主模型（无需删索引） |
 | 改 `AMAP_API_KEY` / `TAVILY_API_KEY` | **必须重启进程**；启动时按 key 存在与否加载对应 MCP server（`app.py::_init_mcp_tools`，缺失则跳过该工具，服务不受影响） |
 | 新增配置项 | 同步改 `config.py` 的 `Settings` 解析 + `.env.example` + 读取该配置的模块 |
@@ -213,7 +214,7 @@ POST /api/chat (SSE)
 | `graph/prompt_builder.py::SYSTEM_COMPONENTS` | 新增组件 → 改元组 + 确保文件存在 |
 | `graph/session_manager.py` 会话 JSON 格式 | `api/chat.py`（save_message）、`api/sessions.py`、`api/tokens.py`、前端 `api.ts` `SessionHistory` + `store.tsx::toUiMessages`、存量 `sessions/*.json` 与 archive |
 | `knowledge_retrieval/orchestrator.py` 检索参数（hybrid top_k=4 / RRF 宽池 20 / rerank 精排 4） | **`scripts/evaluate_ragas.py` 模拟了同样的管线**，改参数要同步 |
-| `graph/memory_store.py` 的 `remember`/`retrieve` | `chat.py`（后台抽取 `_schedule_memory_extraction`）、`agent.py`（记忆检索分支、`_format_memory_retrieval_step`）、`MIN_SCORE`/`top_k`、PG `memories` 表结构；改 `retrieve` 返回字段需同步 `agent.py` 格式化 |
+| `graph/memory_store.py` 的 `remember`/`retrieve` | `chat.py`（后台抽取 `_schedule_memory_extraction`）、`agent.py`（记忆检索分支、`_format_memory_retrieval_step`）、`MIN_SCORE`/`top_k`、ChromaDB collection 结构（`storage/memory/chroma/`）；改 `retrieve` 返回字段需同步 `agent.py` 格式化 |
 | `cache/rag_cache.py::get/put` | `agent.py` 知识路径（命中跳过 Multi-Query/混合检索/Rerank，仍生成答案）；改阈值/TTL/开关 → 同步 `.env` + 重启（4.4） |
 
 ### 4.8 LangSmith 追踪（smith.langchain.com）
@@ -236,7 +237,7 @@ POST /api/chat (SSE)
 - `_split_markdown` / `_split_json` / `_split_pdf` 输出的 dict 字段**不能删改**（doc_id / parent_id / source_path / source_type / locator / text / parent_text）
 - BM25 用 **rank_bm25（BM25Okapi）+ jieba 分词**，索引在加载 manifest 时自动重建（`_build_bm25_index`），tokens 不持久化
 - 改 embedding 模型 / 切分逻辑 → 必须删 `*/vector/chroma/` 旧索引再 rebuild；改分词 / BM25 参数无需删索引（加载时自动重算）
-- 长期记忆改 embedding 模型 → 清空 PG `memories` 表（向量维度可能变化，`remember` 会重新嵌入）
+- 长期记忆改 embedding 模型 → 清空 `storage/memory/chroma/`（或删 collection 重建；向量维度可能变化，`remember` 会重新嵌入）
 
 ### 5.2 前端兼容性
 - 新增/改名/删除 SSE 事件 → 前端 `onEvent` 和类型定义必须同步更新
@@ -246,7 +247,7 @@ POST /api/chat (SSE)
 ### 5.3 并发与状态
 - rebuild 期间不要改 retrieve 逻辑（可能读到半写状态）
 - `rebuild_index()` 的 `finally` 块中 `_building = False` 不能删
-- `memory_store.retrieve` 是同步调用（psycopg2 同步驱动 + numpy 余弦），在 async astream 中会短暂阻塞事件循环；`remember` 是 async（LLM 调用可让出事件循环，psycopg2 部分短暂阻塞）；本地规模可接受，若变慢考虑换 asyncpg/线程池
+- `memory_store.retrieve` 是同步调用（chromadb 同步客户端 + 本地 SQLite），在 async astream 中会短暂阻塞事件循环；`remember` 是 async（LLM 调用可让出事件循环，chromadb 写入部分短暂阻塞）；本地规模可接受，若变慢考虑把 chromadb 调用放进线程池
 
 ### 5.4 初始化顺序
 - 单例均为 import 时创建空实例，`app.py lifespan` 中按序 configure
@@ -273,7 +274,7 @@ POST /api/chat (SSE)
      5a. SessionManager(base_dir)    # 创建 sessions 目录
      5b. get_all_tools(base_dir)     # 实例化 4 个工具
      5c. knowledge_orchestrator.configure()
-6. memory_store.configure()          # PG 连接池 + 建 memories 表（text + float8[] embedding；失败自动降级）
+6. memory_store.configure()          # ChromaDB PersistentClient + collection（storage/memory/chroma/；失败自动降级）
 7. knowledge_indexer.configure()     # load manifest + vector
 8. if not ready: knowledge_indexer.rebuild_index()
 ```

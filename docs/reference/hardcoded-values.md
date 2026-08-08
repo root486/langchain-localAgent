@@ -26,8 +26,8 @@
 | `SUMMARY_CHAIN_TOKEN_LIMIT=3000` | `config.py` | 压缩摘要链 token 上限，超过二次折叠为单条 |
 | `SESSION_REDIS_TTL=86400*7` | `session_manager.py` | Redis 会话过期时间（7 天） |
 | `DEDUP_THRESHOLD=0.93` | `graph/memory_store.py` | 写入去重余弦阈值：与已有记忆相似度超过则视为重复跳过 |
-| `MAX_MEMORIES=2000` | `graph/memory_store.py` | 记忆行数上限，超限删 created_at 最早的（锁死全表扫描边界） |
-| `RETRIEVE_POOL=3000` | `graph/memory_store.py` | retrieve 全表 SELECT 上限（防御性，MAX_MEMORIES 下永不触达） |
+| `MAX_MEMORIES=2000` | `graph/memory_store.py` | 记忆行数上限，超限删 created_at 最早的（锁死检索/去重扫描边界） |
+| `RETRIEVE_POOL=3000` | `graph/memory_store.py` | retrieve 单次 query 的 n_results 上限（防御性，MAX_MEMORIES 下永不触达） |
 | `EXTRACT_MESSAGES_MAX=20` | `graph/memory_store.py` | 抽取器：单次输入的最大消息条数 |
 | `MEMORY_EXTRACT_MIN_MESSAGES=6` | `api/chat.py` | 记忆抽取触发阈值：距上次抽取的新消息 ≥6 条才后台抽取一次 |
 | `memory_extracted_until` | `graph/session_manager.py` | 会话记录加性字段：记忆抽取游标（已抽取的消息条数），前端不读 |

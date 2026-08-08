@@ -67,7 +67,7 @@ class Settings:
     embedding_model: str
     embedding_api_key: str | None
     embedding_base_url: str
-    pg_dsn: str = ""  # PostgreSQL 长期记忆事实源（本机 D:\PostgreSQL，库 raglongmem）
+    pg_dsn: str = ""  # （已无消费方：长期记忆迁至 ChromaDB 后不再读 PG，仅保留解析）
     redis_url: str = ""
     rag_cache_enabled: bool = True  # 检索证据语义缓存开关（RAG_CACHE_ENABLED）
     rag_cache_ttl: int = 86_400  # 缓存有效期（秒），默认 24h（RAG_CACHE_TTL）

@@ -1,21 +1,27 @@
-"""简单长期记忆：PostgreSQL 单表 + 应用侧余弦召回。
+"""简单长期记忆：纯 ChromaDB 嵌入式 SQLite（单 collection + 应用侧阈值）。
 
-一张 `memories` 表（text + embedding float8[]）：
-- 写入：一次 LLM 抽取对话中的稳定事实 → 批量嵌入 → 与已有记忆余弦去重（> DEDUP_THRESHOLD 跳过）→ INSERT；
-- 读取：嵌入 query → 全表向量 numpy 余弦 → 阈值过滤 → top_k → 更新 last_used_at。
-无 ChromaDB、无 scope/category/status 枚举、无整合决策器、无遗忘规则（仅行数上限裁剪 `_prune`）。
+一个 `memories` collection（documents=text，embeddings=向量，metadata 存 created_at）：
+- 写入：一次 LLM 抽取对话中的稳定事实 → 批量嵌入 → 与已有记忆余弦去重（> DEDUP_THRESHOLD 跳过）→ add；
+- 读取：嵌入 query → collection.query 余弦距离 → 转相似度 → 阈值过滤 → top_k。
+无 PostgreSQL / 无 psycopg2 / 无 numpy 全表扫描 / 无 scope/category/status 枚举 / 无整合决策器 / 无遗忘规则（仅行数上限裁剪 `_prune`）。
 
-PG 不可用（未配置 / 连接失败）→ is_ready()=False，检索自动降级（同 redis 降级模式）。
+存储目录 `storage/memory/chroma/`，与知识库 `storage/knowledge/vector/chroma/` 完全隔离
+（知识库 rebuild 只 delete 它自己目录里的 collection，物理上碰不到这里）。
+
+ChromaDB 不可用（未配置 / 初始化失败）→ is_ready()=False，检索自动降级（同 redis 降级模式）。
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-import numpy as np
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 from langsmith import traceable
 
@@ -28,12 +34,16 @@ logger = logging.getLogger(__name__)
 MIN_SCORE = 0.4
 # 写入去重余弦阈值：与已有记忆相似度超过该值视为重复，跳过（近似语义去重）
 DEDUP_THRESHOLD = 0.93
-# 行数上限：超限删最旧（锁死 retrieve / 去重的全表扫描边界）
+# 行数上限：超限删最旧（锁死 retrieve / 去重的扫描边界）
 MAX_MEMORIES = 2000
-# retrieve 全表 SELECT 上限（防御性，MAX_MEMORIES 下永不触达）
+# retrieve 单次 query 的 n_results 上限（防御性，MAX_MEMORIES 下永不触达）
 RETRIEVE_POOL = 3000
 # 抽取器：单次输入的最大消息条数
 EXTRACT_MESSAGES_MAX = 20
+
+# Chroma collection 名与持久化目录（相对 base_dir，与知识库 chroma 目录隔离）
+COLLECTION_NAME = "memories"
+COLLECTION_DIR = "storage/memory/chroma"
 
 # ---------- 抽取器提示词（简化版：只输出纯 text 数组，去 scope/category/confidence） ----------
 
@@ -60,45 +70,40 @@ EXTRACTOR_SYSTEM_PROMPT = (
 class MemoryStore:
     def __init__(self) -> None:
         self.base_dir: Path | None = None
-        self._pool: Any = None  # psycopg2 SimpleConnectionPool
+        self._client: chromadb.ClientAPI | None = None
+        self._collection: Any | None = None
 
     # ---------- 生命周期 ----------
 
     def configure(self, base_dir: Path) -> None:
-        """初始化 PG 连接池 + 建表。PG 不可用 → 降级（is_ready()=False）。"""
+        """初始化 ChromaDB 持久化客户端 + collection。失败 → 降级（is_ready()=False）。"""
         self.base_dir = base_dir
-        dsn = get_settings().pg_dsn
-        if not dsn:
-            logger.info("[memory_store] PG_DSN 未配置，长期记忆存储降级关闭")
-            self._pool = None
-            return
         try:
-            import psycopg2.pool
-
-            self._pool = psycopg2.pool.SimpleConnectionPool(
-                minconn=1, maxconn=5, dsn=dsn, connect_timeout=5
+            path = base_dir / COLLECTION_DIR
+            path.mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(
+                path=str(path),
+                settings=ChromaSettings(anonymized_telemetry=False),
             )
-            self._ensure_schema()
-            logger.info("[memory_store] PostgreSQL 长期记忆就绪")
+            self._collection = self._client.get_or_create_collection(
+                name=COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+            logger.info(f"[memory_store] ChromaDB 长期记忆就绪：{path}")
         except Exception:
-            logger.warning("[memory_store] PostgreSQL 连接失败，长期记忆存储降级", exc_info=True)
-            self._pool = None
+            logger.warning("[memory_store] ChromaDB 初始化失败，长期记忆降级关闭", exc_info=True)
+            self._client = None
+            self._collection = None
 
     def is_ready(self) -> bool:
-        """PG 连接池可用即就绪（不再依赖 embedding key，嵌入失败由 retrieve/remember 各自捕获）。"""
-        return self._pool is not None
+        """ChromaDB collection 可用即就绪（嵌入失败由 retrieve/remember 各自捕获）。"""
+        return self._collection is not None
 
     def status(self) -> dict[str, Any]:
         count = 0
-        if self._pool is not None:
+        if self._collection is not None:
             try:
-                conn = self._pool.getconn()
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT count(*) FROM memories")
-                        count = int(cur.fetchone()[0])
-                finally:
-                    self._pool.putconn(conn)
+                count = self._collection.count()
             except Exception:
                 pass
         return {"ready": self.is_ready(), "count": count}
@@ -111,50 +116,46 @@ class MemoryStore:
         process_outputs=lambda o: {"n": len(o)},
     )
     def retrieve(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
-        """语义召回：嵌入 query → 全表向量 numpy 余弦 → 阈值过滤 + 排序。
+        """语义召回：嵌入 query → collection.query 余弦距离 → 阈值过滤 + 排序。
 
         返回 `[{text, score, source}]`，与旧实现字段兼容（source 恒为 "memory"）。
         """
         if not self.is_ready() or not query.strip():
             return []
         try:
-            q = np.asarray(EmbeddingClient().embed_one(query), dtype=np.float32)
-            rows = self._load_all()
-            if not rows:
+            if self._collection.count() == 0:
                 return []
-            mat = np.stack([np.asarray(r["embedding"], dtype=np.float32) for r in rows])
-            q_norm = np.linalg.norm(q)
-            norms = np.linalg.norm(mat, axis=1)
-            scores = (mat @ q) / (norms * q_norm + 1e-9)
+            q = EmbeddingClient().embed_one(query)
+            res = self._collection.query(
+                query_embeddings=[q],
+                n_results=RETRIEVE_POOL,
+                include=["documents", "metadatas", "distances"],
+            )
+            docs = (res.get("documents") or [[]])[0]
+            dists = (res.get("distances") or [[]])[0]
         except Exception:
             logger.warning("[memory_store] 向量召回失败", exc_info=True)
             return []
 
-        hits: list[tuple[int, dict[str, Any]]] = []
-        for i, row in enumerate(rows):
-            score = float(scores[i])
+        hits: list[dict[str, Any]] = []
+        for doc, dist in zip(docs, dists):
+            score = 1.0 - float(dist)  # Chroma 余弦距离 ∈ [0,2]，相似度 = 1 - distance
             if score < MIN_SCORE:
                 continue
             hits.append(
-                (
-                    row["id"],
-                    {
-                        "text": row["text"],
-                        "score": round(score, 4),
-                        "source": "memory",
-                    },
-                )
+                {
+                    "text": str(doc or ""),
+                    "score": round(score, 4),
+                    "source": "memory",
+                }
             )
-        hits.sort(key=lambda item: item[1]["score"], reverse=True)
-        hits = hits[:top_k]
-        if hits:
-            self._touch([item[0] for item in hits])
-        return [item[1] for item in hits]
+        hits.sort(key=lambda item: item["score"], reverse=True)
+        return hits[:top_k]
 
     # ---------- 写入：自动抽取（一次 LLM 调用） ----------
 
     async def remember(self, messages: list[dict[str, Any]]) -> int:
-        """从会话消息自动写入长期记忆：LLM 抽取 → 批量嵌入 → 余弦去重 → INSERT。
+        """从会话消息自动写入长期记忆：LLM 抽取 → 批量嵌入 → 余弦去重 → add。
 
         返回实际写入条数。任何一步失败都不抛出，只打日志（调用方是后台任务，不能影响 SSE 响应）。
         """
@@ -223,139 +224,54 @@ class MemoryStore:
 
     # ---------- 内部实现 ----------
 
-    def _ensure_schema(self) -> None:
-        """建 memories 表；旧结构（无 embedding 列）→ DROP 重建。幂等。"""
-        if self._pool is None:
-            return
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                # 旧表有 scope/category/status/metadata 而无 embedding 列，向量无法使用 → 丢弃重建
-                cur.execute("SELECT to_regclass('memories')")
-                if cur.fetchone()[0] is not None:
-                    cur.execute(
-                        "SELECT count(*) FROM information_schema.columns "
-                        "WHERE table_name = 'memories' AND column_name = 'embedding'"
-                    )
-                    if int(cur.fetchone()[0]) == 0:
-                        cur.execute("SELECT count(*) FROM memories")
-                        n = int(cur.fetchone()[0])
-                        logger.warning(
-                            "[memory_store] 旧 memories 表缺 embedding 列，DROP 重建（丢弃 %s 条存量）", n
-                        )
-                        cur.execute("DROP TABLE memories")
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS memories (
-                        id           BIGSERIAL PRIMARY KEY,
-                        text         TEXT NOT NULL,
-                        embedding    FLOAT8[] NOT NULL,
-                        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        last_used_at TIMESTAMPTZ
-                    )
-                    """
-                )
-            conn.commit()
-        finally:
-            self._pool.putconn(conn)
-
-    def _load_all(self) -> list[dict[str, Any]]:
-        """取全表 (id, text, embedding)，按 id 倒序，上限 RETRIEVE_POOL。失败返回 []。"""
-        if self._pool is None:
-            return []
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, text, embedding FROM memories ORDER BY id DESC LIMIT %s",
-                    (RETRIEVE_POOL,),
-                )
-                return [
-                    {"id": int(row[0]), "text": row[1], "embedding": row[2]}
-                    for row in cur.fetchall()
-                ]
-        except Exception:
-            logger.warning("[memory_store] PG 全表读取失败", exc_info=True)
-            return []
-        finally:
-            self._pool.putconn(conn)
-
     def _insert_new(self, items: list[tuple[str, list[float]]]) -> int:
-        """批量写入：与已有记忆余弦去重（> DEDUP_THRESHOLD 跳过）→ INSERT。返回实际写入条数。
-
-        注意：psycopg2 对 float8[] 需要纯 Python list（numpy 数组有 adapter 冲突），写入前统一转换。
-        """
+        """批量写入：逐条与已有记忆余弦去重（> DEDUP_THRESHOLD 跳过）→ add。返回实际写入条数。"""
         if not items:
             return 0
-        conn = self._pool.getconn()
-        try:
-            existing = self._load_all()
-            emat = None
-            enorm = None
-            if existing:
-                emat = np.stack([np.asarray(r["embedding"], dtype=np.float32) for r in existing])
-                enorm = np.linalg.norm(emat, axis=1)
-
-            written = 0
-            with conn.cursor() as cur:
-                for text, vector in items:
-                    nvec = np.asarray(vector, dtype=np.float32)
-                    if emat is not None:
-                        sims = (emat @ nvec) / (enorm * np.linalg.norm(nvec) + 1e-9)
-                        if np.max(sims) > DEDUP_THRESHOLD:
-                            continue
-                    cur.execute(
-                        "INSERT INTO memories (text, embedding) VALUES (%s, %s)",
-                        (text, list(map(float, vector))),
-                    )
-                    written += 1
-            conn.commit()
-            return written
-        except Exception:
-            conn.rollback()
-            logger.warning("[memory_store] PG 批量写入失败", exc_info=True)
-            return 0
-        finally:
-            self._pool.putconn(conn)
-
-    def _touch(self, memory_ids: list[int]) -> None:
-        """命中即更新 last_used_at。失败静默。"""
-        if self._pool is None or not memory_ids:
-            return
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE memories SET last_used_at = now() WHERE id = ANY(%s)",
-                    (memory_ids,),
+        written = 0
+        for text, vector in items:
+            # 去重：查与已有记忆最相似的一条，相似度超阈值即视为重复
+            sim = 0.0
+            try:
+                dup = self._collection.query(
+                    query_embeddings=[vector],
+                    n_results=1,
+                    include=["distances"],
                 )
-            conn.commit()
-        except Exception:
-            pass
-        finally:
-            self._pool.putconn(conn)
+                d = (dup.get("distances") or [[]])[0]
+                if d:
+                    sim = 1.0 - float(d[0])
+            except Exception:
+                logger.warning("[memory_store] 记忆去重查询失败", exc_info=True)
+            if sim > DEDUP_THRESHOLD:
+                continue
+            self._collection.add(
+                ids=[str(uuid4())],
+                documents=[text],
+                embeddings=[vector],
+                metadatas=[{"created_at": time.time()}],
+            )
+            written += 1
+        return written
 
     def _prune(self) -> None:
         """行数上限：超限删 created_at 最早的。失败静默。"""
-        if self._pool is None:
+        if self._collection is None:
             return
-        conn = self._pool.getconn()
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM memories")
-                total = int(cur.fetchone()[0])
-                if total > MAX_MEMORIES:
-                    to_delete = total - MAX_MEMORIES
-                    cur.execute(
-                        "DELETE FROM memories WHERE id IN "
-                        "(SELECT id FROM memories ORDER BY created_at ASC LIMIT %s)",
-                        (to_delete,),
-                    )
-            conn.commit()
+            total = self._collection.count()
+            if total > MAX_MEMORIES:
+                to_delete = total - MAX_MEMORIES
+                res = self._collection.get(include=["metadatas"])
+                ids = res.get("ids") or []
+                metas = res.get("metadatas") or []
+                pairs = sorted(
+                    ((m.get("created_at") or 0.0, i) for m, i in zip(metas, ids))
+                )
+                oldest_ids = [i for _, i in pairs[:to_delete]]
+                self._collection.delete(ids=oldest_ids)
         except Exception:
-            pass
-        finally:
-            self._pool.putconn(conn)
+            logger.warning("[memory_store] 记忆裁剪失败", exc_info=True)
 
     def _build_llm(self) -> Any:
         """记忆抽取专用轻量 LLM：优先 SUMMARY_MODEL（便宜），未配置回退主模型。"""

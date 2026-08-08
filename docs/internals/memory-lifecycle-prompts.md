@@ -1,6 +1,6 @@
 # 长期记忆生命周期：抽取器 / 整合决策器 / 遗忘策略 提示词（DEPRECATED）
 
-> ⚠️ **已废弃（2026-08-01）**：长期记忆已重构为简单 PG 单表方案（见 `graph/memory_store.py`），
+> ⚠️ **已废弃（2026-08-01）**：长期记忆已重构为简单 ChromaDB 单 collection 方案（见 `graph/memory_store.py`），
 > 整合决策器 / 遗忘规则 / scope-category-status 枚举全部删除。
 > 现保留的只有「抽取器」概念：一次 LLM 调用从对话提取纯 text 事实数组
 > （`EXTRACTOR_SYSTEM_PROMPT`，输出 `{"memories": ["..."]}`），写入入口 `MemoryStore.remember()`，
